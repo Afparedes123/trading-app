@@ -51,31 +51,56 @@ def save_trade(symbol, direction, entry, sl, tp1, tp2, tp3, prob, result, source
     conn.commit(); conn.close()
 
 def get_real_price(symbol):
-    # Precio real gratis
-    try:
-        if "BTC" in symbol:
+    # BTC con 4 fuentes que SI funcionan en Render (Binance está bloqueado)
+    if "BTC" in symbol:
+        # 1. Coinbase (más confiable en Render)
+        try:
+            r = requests.get("https://api.coinbase.com/v2/prices/BTC-USD/spot", timeout=5)
+            if r.status_code==200:
+                price = float(r.json()["data"]["amount"])
+                if price > 1000: return price
+        except: pass
+        # 2. CoinGecko
+        try:
+            r = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd", timeout=5)
+            if r.status_code==200:
+                return float(r.json()["bitcoin"]["usd"])
+        except: pass
+        # 3. Kraken
+        try:
+            r = requests.get("https://api.kraken.com/0/public/Ticker?pair=XBTUSD", timeout=5)
+            if r.status_code==200:
+                return float(r.json()["result"]["XXBTZUSD"]["c"][0])
+        except: pass
+        # 4. Binance fallback
+        try:
             r = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", timeout=5)
             if r.status_code==200: return float(r.json()["price"])
-        if "XAU" in symbol:
-            # Intenta gold-api.com (gratis sin key)
-            try:
-                r = requests.get("https://api.gold-api.com/price/XAU", timeout=5)
-                if r.status_code==200:
-                    data = r.json()
-                    price = data.get("price") or data.get("price_gram_24k")
-                    if price: return float(price)
-            except: pass
-            # Fallback biquote
-            try:
-                r = requests.get("https://api.biquote.io/v1/ticker?symbol=XAUUSD", timeout=5)
-                if r.status_code==200:
-                    data = r.json()
-                    if isinstance(data, list): data = data[0]
-                    return float(data.get("price") or data.get("last") or data.get("close"))
-            except: pass
-    except: pass
-    # Fallback precio actual que viste en tu foto
-    return 4025.86 if "XAU" in symbol else 43225.0
+        except: pass
+        return 108500.0  # Fallback actual 2026
+
+    if "XAU" in symbol:
+        try:
+            r = requests.get("https://api.gold-api.com/price/XAU", timeout=5)
+            if r.status_code==200:
+                data = r.json()
+                price = data.get("price")
+                if price: return float(price)
+        except: pass
+        try:
+            # GoldPrice.org - gratis
+            r = requests.get("https://data-asg.goldprice.org/dbXRates/USD", timeout=5)
+            if r.status_code==200:
+                # formato: XAU tiene xauPrice
+                data = r.json()
+                items = data.get("items",[])
+                for it in items:
+                    if it.get("curr")=="XAU":
+                        return float(it.get("xauPrice",0))
+        except: pass
+        return 4025.86
+    return 0
+
 
 def calculate_probability(symbol, hour_ec):
     stats = get_stats(symbol)

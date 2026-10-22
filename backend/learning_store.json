@@ -1,0 +1,18 @@
+{
+  "XAUUSD": {
+    "trades": 127,
+    "win_tp1": 0.72,
+    "win_tp2": 0.55,
+    "win_tp3": 0.38,
+    "atr_promedio": 1.2,
+    "sl_factor": 1.0
+  },
+  "BTCUSDT": {
+    "trades": 89,
+    "win_tp1": 0.68,
+    "win_tp2": 0.51,
+    "win_tp3": 0.32,
+    "atr_promedio": 150,
+    "sl_factor": 1.1
+  }
+}

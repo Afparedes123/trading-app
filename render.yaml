@@ -1,0 +1,34 @@
+services:
+  - type: web
+    name: edgealert-backend
+    env: docker
+    plan: free
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /health
+    disk:
+      name: learning-disk
+      mountPath: /app/data
+      sizeGB: 1
+    envVars:
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: edgealert-redis
+          property: connectionString
+  - type: web
+    name: edgealert-frontend
+    env: docker
+    plan: free
+    dockerfilePath: ./frontend/Dockerfile
+    dockerContext: ./frontend
+    envVars:
+      - key: NEXT_PUBLIC_API_URL
+        fromService:
+          type: web
+          name: edgealert-backend
+          property: host
+  - type: redis
+    name: edgealert-redis
+    plan: free
+    maxmemoryPolicy: allkeys-lru

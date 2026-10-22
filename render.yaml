@@ -6,16 +6,9 @@ services:
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
     healthCheckPath: /health
-
     - type: web
     name: edgealert-frontend
     env: docker
     plan: free
     dockerfilePath: ./frontend/Dockerfile
     dockerContext: ./frontend
-    envVars:
-            - key: NEXT_PUBLIC_API_URL
-        fromService:
-          type: web
-          name: edgealert-backend
-          property: host

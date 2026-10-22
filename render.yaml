@@ -6,9 +6,6 @@ services:
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
     healthCheckPath: /health
-    envVars:
-            - key: PORT
-        value: 10000
 
     - type: web
     name: edgealert-frontend
@@ -22,5 +19,3 @@ services:
           type: web
           name: edgealert-backend
           property: host
-            - key: PORT
-        value: 10000

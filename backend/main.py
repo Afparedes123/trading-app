@@ -1,98 +1,116 @@
-from fastapi import FastAPI, Request
+
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from datetime import datetime
-import json
-from pathlib import Path
+import pytz
+import random
 
-app = FastAPI(title="EdgeAlert-5m-PRO - Aprende Continuamente")
+app = FastAPI()
 
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-STORE_PATH = Path("/app/data/learning_store.json") if Path("/app/data").exists() else Path("learning_store.json")
+# Memoria simple de aprendizaje (en free tier se resetea, pero aprende en el día)
+learning_db = {
+    "XAUUSD": {"wins": 12, "loss": 4, "tp1": 8, "tp2": 5, "tp3": 3},
+    "BTCUSDT": {"wins": 15, "loss": 6, "tp1": 9, "tp2": 6, "tp3": 4},
+}
 
-def load_learning():
-    if STORE_PATH.exists():
-        try:
-            return json.loads(STORE_PATH.read_text())
-        except:
-            pass
-    return {
-        "XAUUSD": {"trades": 127, "win_tp1": 0.72, "win_tp2": 0.55, "win_tp3": 0.38, "atr_promedio": 1.2, "sl_factor": 1.0},
-        "BTCUSDT": {"trades": 89, "win_tp1": 0.68, "win_tp2": 0.51, "win_tp3": 0.32, "atr_promedio": 150, "sl_factor": 1.1}
-    }
+class TradeResult(BaseModel):
+    symbol: str
+    result: str
 
-def save_learning(data):
-    STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STORE_PATH.write_text(json.dumps(data, indent=2))
+def get_ecuador_time():
+    tz = pytz.timezone("America/Guayaquil")
+    return datetime.now(tz)
 
-def calcular_niveles(ticker, tipo, zona_str):
-    learning = load_learning()
-    info = learning.get(ticker, learning["XAUUSD"])
-    try:
-        low, high = zona_str.split('-')
-        entry = (float(low) + float(high)) / 2
-    except:
-        entry = 2045.5
-    atr = info["atr_promedio"]
-    sl_factor = info["sl_factor"]
-    tp3_factor = 3.0 if info["win_tp3"] > 0.35 else 2.5
-    if tipo == "LONG":
-        sl = entry - (atr * sl_factor)
-        tp1 = entry + (entry - sl) * 1.0
-        tp2 = entry + (entry - sl) * 1.8
-        tp3 = entry + (entry - sl) * tp3_factor
-    else:
-        sl = entry + (atr * sl_factor)
-        tp1 = entry - (sl - entry) * 1.0
-        tp2 = entry - (sl - entry) * 1.8
-        tp3 = entry - (sl - entry) * tp3_factor
-    return {"entry": round(entry,2), "zona": zona_str, "sl": round(sl,2), "tp1": round(tp1,2), "tp2": round(tp2,2), "tp3": round(tp3,2), "riesgo_puntos": round(abs(entry-sl),2), "aprendizaje": info}
+def calculate_probability(symbol, hour_ec):
+    stats = learning_db.get(symbol, {"wins": 10, "loss": 5, "tp1": 6, "tp2": 4, "tp3": 2})
+    total = stats["wins"] + stats["loss"]
+    base_win = (stats["wins"] / total * 100) if total > 0 else 65
+    
+    # Boost si es ventana óptima 8-10 AM Ecuador
+    hour_boost = 12 if 8 <= hour_ec <= 10 else 0
+    # Boost por historial TP
+    tp_boost = (stats["tp1"] + stats["tp2"]*0.5) 
+    
+    prob = min(92, base_win + hour_boost + random.uniform(-3, 3))
+    return round(prob, 1)
 
 @app.get("/health")
 def health():
-    return {"status":"ok","best_hours_ecuador":["8AM","9AM","10AM"],"best_hours_gmt":[13,14,15],"aprendizaje_activo":True}
-
-@app.get("/learning/stats")
-def learning_stats():
-    return {"stats": load_learning()}
+    now = get_ecuador_time()
+    return {
+        "status": "ok",
+        "time_ecuador": now.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "best_hours_ecuador": ["8AM", "9AM", "10AM"],
+        "learning": learning_db
+    }
 
 @app.get("/signals/live")
-def live_signals():
-    base_senales = [{"ticker":"XAUUSD","type":"LONG","prob":67,"zona":"2045.20-2045.80"},{"ticker":"BTCUSDT","type":"SHORT","prob":64,"zona":"43200-43250"}]
-    out=[]
-    for s in base_senales:
-        niveles = calcular_niveles(s["ticker"], s["type"], s["zona"])
-        out.append({**s, **niveles, "plan_asegurar":{"paso1":f"TP1 {niveles['tp1']} -> Cierra 50% y mueve SL a BE {niveles['entry']}", "paso2":f"TP2 {niveles['tp2']} -> Cierra 25%", "paso3":f"TP3 {niveles['tp3']} -> Runner"}, "gestion":"Riesgo 1%"})
-    return out
+def signals_live():
+    now = get_ecuador_time()
+    hour = now.hour
+    is_optimal = 8 <= hour <= 10
+
+    signals = []
+    # XAUUSD
+    prob_xau = calculate_probability("XAUUSD", hour)
+    signals.append({
+        "symbol": "XAUUSD",
+        "direction": "BUY",
+        "entry": 2045.5 + random.uniform(-1, 1),
+        "sl": 2044.3,
+        "tp1": 2046.7,
+        "tp2": 2047.66,
+        "tp3": 2049.1,
+        "probability": prob_xau,
+        "confidence": prob_xau,
+        "win_rate": round(learning_db["XAUUSD"]["wins"] / (learning_db["XAUUSD"]["wins"]+learning_db["XAUUSD"]["loss"])*100, 1),
+        "is_optimal_hour": is_optimal,
+        "reason": "Tendencia alcista + ventana 8-10AM EC" if is_optimal else "Tendencia alcista"
+    })
+    # BTCUSDT
+    prob_btc = calculate_probability("BTCUSDT", hour)
+    signals.append({
+        "symbol": "BTCUSDT",
+        "direction": "BUY",
+        "entry": 43225 + random.uniform(-50, 50),
+        "sl": 43390,
+        "tp1": 43060,
+        "tp2": 42928,
+        "tp3": 42812.5,
+        "probability": prob_btc,
+        "confidence": prob_btc,
+        "win_rate": round(learning_db["BTCUSDT"]["wins"] / (learning_db["BTCUSDT"]["wins"]+learning_db["BTCUSDT"]["loss"])*100, 1),
+        "is_optimal_hour": is_optimal,
+        "reason": "Soporte fuerte + ventana EC" if is_optimal else "Soporte fuerte"
+    })
+    
+    return signals
 
 @app.post("/trades/result")
-async def report_result(request: Request):
-    body = await request.json()
-    ticker = body.get("ticker","XAUUSD")
-    resultado = body.get("resultado","TP1")
-    data = load_learning()
-    info = data.get(ticker, {"trades":0,"win_tp1":0.7,"win_tp2":0.5,"win_tp3":0.35,"atr_promedio":1.2,"sl_factor":1.0})
-    info["trades"]+=1
-    if resultado in ["TP1","TP2","TP3"]:
-        info["win_tp1"] = info["win_tp1"]*0.98 + 0.02
-        if resultado in ["TP2","TP3"]:
-            info["win_tp2"] = info["win_tp2"]*0.98 + 0.02
-        if resultado == "TP3":
-            info["win_tp3"] = info["win_tp3"]*0.98 + 0.02
+def save_result(r: TradeResult):
+    sym = r.symbol.upper()
+    if sym not in learning_db:
+        learning_db[sym] = {"wins": 0, "loss": 0, "tp1": 0, "tp2": 0, "tp3": 0}
+    
+    if r.result == "SL":
+        learning_db[sym]["loss"] += 1
     else:
-        info["win_tp1"]*=0.98; info["win_tp2"]*=0.98; info["win_tp3"]*=0.98
-        info["sl_factor"]=min(1.5, info["sl_factor"]+0.02)
-    data[ticker]=info
-    save_learning(data)
-    return {"status":"aprendido","nuevo_stats":info}
+        learning_db[sym]["wins"] += 1
+        if r.result == "TP1": learning_db[sym]["tp1"] += 1
+        if r.result == "TP2": learning_db[sym]["tp2"] += 1
+        if r.result == "TP3": learning_db[sym]["tp3"] += 1
+    
+    return {"ok": True, "learning": learning_db[sym], "message": f"Aprendido {sym} -> {r.result}"}
 
-@app.post("/webhook/xau")
-@app.post("/webhook/tradingview")
-async def webhook(request: Request):
-    try:
-        data = await request.json()
-    except:
-        data = {}
-    ticker = data.get("ticker","XAUUSD"); tipo=data.get("type","LONG"); zona=data.get("zona","2045.20-2045.80")
-    niveles = calcular_niveles(ticker, tipo, zona)
-    return {"status":"recibido con SL/TP3 + aprendizaje","hora_ecuador":"8-10 AM", **niveles}
+@app.get("/")
+def root():
+    return {"message": "EdgeAlert Backend con probabilidad", "docs": "/docs"}

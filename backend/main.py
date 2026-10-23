@@ -138,16 +138,32 @@ def analyze_market(symbol):
         return {"avg_up":12.5,"avg_down":8.3,"volatility":0.8,"trend":"NEUTRAL","up_streak":0,"down_streak":0}
 
 def calculate_tp_sl(entry, symbol, direction="BUY"):
+    """
+    CORREGIDO con lotaje REAL del usuario:
+    - Oro: 4015 -> 4016 ($1 move) = $1.62 profit (no $10)
+    - Por tanto para $10 necesitas 10 / 1.62 = 6.17 USD de movimiento
+    - BTC: Asumimos proporcional: $1 move = $0.0162 profit (100x menor que oro)
+      Para $10 necesitas 617 USD de movimiento (realista en 10-15min)
+    """
+    TARGET_DOLLAR = 10.0
+    
+    # Profit real por cada $1 de movimiento segun tu broker y lotaje
+    PROFIT_PER_USD_XAU = 1.62  # Tu dato: $1 move = $1.62
+    PROFIT_PER_USD_BTC = 0.0162  # Estimado: 100x menor, ajusta segun tu BTC
+    
     if "XAU" in symbol:
-        sl_dist = 1.0
-        tp1_dist = 1.0
-        tp2_dist = 2.0
-        tp3_dist = 3.0
+        # Para $10: distancia = 10 / 1.62 = 6.1728
+        sl_dist = round(TARGET_DOLLAR / PROFIT_PER_USD_XAU, 2)  # 6.17
+        tp1_dist = sl_dist  # $10
+        tp2_dist = round((TARGET_DOLLAR*2) / PROFIT_PER_USD_XAU, 2)  # $20 = 12.35
+        tp3_dist = round((TARGET_DOLLAR*3) / PROFIT_PER_USD_XAU, 2)  # $30 = 18.52
     else:
-        sl_dist = 100.0
-        tp1_dist = 100.0
-        tp2_dist = 200.0
-        tp3_dist = 300.0
+        # BTC: para $10 necesitas 617 USD
+        sl_dist = round(TARGET_DOLLAR / PROFIT_PER_USD_BTC, 2)  # 617.28
+        tp1_dist = sl_dist
+        tp2_dist = round((TARGET_DOLLAR*2) / PROFIT_PER_USD_BTC, 2)  # 1234.57
+        tp3_dist = round((TARGET_DOLLAR*3) / PROFIT_PER_USD_BTC, 2)  # 1851.85
+
     if direction=="BUY":
         sl = round(entry - sl_dist,2)
         tp1 = round(entry + tp1_dist,2)
@@ -163,7 +179,16 @@ def calculate_tp_sl(entry, symbol, direction="BUY"):
 def calculate_objective_success_rate(symbol):
     try:
         conn = sqlite3.connect(DB_PATH); c = conn.cursor()
-        objetivo = 1.0 if "XAU" in symbol else 100.0
+        # CORREGIDO: objetivo real para $10 con tu lotaje
+        if "XAU" in symbol:
+            objetivo_tp1 = 10.0 / 1.62  # 6.17 USD para $10
+            objetivo_tp2 = 20.0 / 1.62  # 12.35 USD para $20
+            objetivo_tp3 = 30.0 / 1.62  # 18.52 USD para $30
+        else:
+            objetivo_tp1 = 10.0 / 0.0162  # 617.28 USD para $10
+            objetivo_tp2 = 20.0 / 0.0162
+            objetivo_tp3 = 30.0 / 0.0162
+        
         c.execute("SELECT price FROM price_history WHERE symbol=? ORDER BY id DESC LIMIT 200", (symbol,))
         prices = [r[0] for r in c.fetchall()][::-1]
         conn.close()
@@ -180,11 +205,11 @@ def calculate_objective_success_rate(symbol):
             subida_10 = max_10 - entry
             subida_15 = max_15 - entry
             total_ventanas += 1
-            if subida_10 >= objetivo or subida_15 >= objetivo:
+            if subida_10 >= objetivo_tp1 or subida_15 >= objetivo_tp1:
                 exitos_tp1 += 1
-            if subida_15 >= objetivo*2:
+            if subida_15 >= objetivo_tp2:
                 exitos_tp2 += 1
-            if subida_15 >= objetivo*3:
+            if subida_15 >= objetivo_tp3:
                 exitos_tp3 += 1
         if total_ventanas == 0:
             return 70.0, 70.0, 50.0, 35.0
@@ -196,6 +221,8 @@ def calculate_objective_success_rate(symbol):
     except Exception as e:
         print(f"objective calc error {e}")
         return 70.0, 70.0, 50.0, 35.0
+
+
 
 def calculate_probability(symbol, hour_ec, market_data):
     stats = get_stats(symbol)

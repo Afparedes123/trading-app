@@ -137,6 +137,50 @@ def analyze_market(symbol):
     except:
         return {"avg_up":12.5,"avg_down":8.3,"volatility":0.8,"trend":"NEUTRAL","up_streak":0,"down_streak":0}
 
+def determine_direction(symbol, market, prices):
+    """
+    Decide BUY o SELL segun mercado real:
+    - Racha UP >=3 + BULLISH = BUY
+    - Racha DOWN >=3 + BEARISH = SELL
+    - Si precio > media 20 velas = BUY, si < media = SELL
+    - Volatilidad + tendencia confirman
+    """
+    try:
+        if not prices or len(prices) < 20:
+            return "BUY"  # por defecto
+        
+        last_price = prices[-1]
+        sma20 = sum(prices[-20:]) / 20
+        sma50 = sum(prices[-50:]) / 50 if len(prices) >= 50 else sma20
+        
+        up_streak = market.get("up_streak",0)
+        down_streak = market.get("down_streak",0)
+        trend = market.get("trend","NEUTRAL")
+        
+        # Señal fuerte de venta
+        if down_streak >= 3 and trend == "BEARISH":
+            return "SELL"
+        if last_price < sma20 and last_price < sma50 and down_streak >= 2:
+            return "SELL"
+        if trend == "BEARISH" and last_price < sma20:
+            return "SELL"
+        
+        # Señal fuerte de compra
+        if up_streak >= 3 and trend == "BULLISH":
+            return "BUY"
+        if last_price > sma20 and last_price > sma50 and up_streak >= 2:
+            return "BUY"
+        if trend == "BULLISH" and last_price > sma20:
+            return "BUY"
+        
+        # Por defecto: sigue tendencia de media
+        if last_price > sma20:
+            return "BUY"
+        else:
+            return "SELL"
+    except:
+        return "BUY"
+
 def calculate_tp_sl(entry, symbol, direction="BUY"):
     """
     CORREGIDO con lotaje REAL del usuario:
@@ -316,7 +360,7 @@ def signals_live():
         prob_t2 = stats.get("prob_tp2_15min",50)
         prob_t3 = stats.get("prob_tp3_15min",35)
         signals.append({
-            "symbol":sym,"direction":"BUY","entry":real_price,"sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp3,
+            "symbol":sym,"direction":direction,"entry":real_price,"sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp3,
             "probability":prob,"confidence":prob,"win_rate":win_rate,"is_optimal_hour":is_optimal,
             "has_active_trade":has_active,"market_analysis":market,
             "probabilidad_nuevos_objetivos":{
@@ -334,11 +378,11 @@ def signals_live():
             optimo = "✅ VENTANA OPTIMA 8-10AM EC" if is_optimal else f"⏰ {hour}:00 EC - OPORTUNIDAD 24/7"
             prob_obj = stats.get("prob_objetivos",70)
             prob_t1 = stats.get("prob_tp1_10min",70)
-            msg = f"🟢 *ENTRADA {sym} BUY - {prob}% PROB NUEVOS OBJETIVOS*\n{optimo}\n*Prob total:* {prob}% = 40% historial ({win_rate}%) + 40% objetivos $10 ({prob_obj}%) + 20% mercado\n*Objetivo $10:* Se logro {prob_t1}% de veces en 10-15min en ultimas 200 velas\n*Mercado:* {market['trend']} racha UP:{market['up_streak']} | Vol: {market['volatility']}\n\n*ENTRY:* {real_price}\n*SL:* {sl} (-$10) | *TP1:* {tp1} (+$10 | {prob_t1}% prob)\n*TP2:* {tp2} (+$20) | *TP3:* {tp3} (+$30)\n⏱️ Duracion: 10-15 min | WinRate: {win_rate}%\n_Hora: {now.strftime('%H:%M:%S')} EC_"
+            msg = f"🟢 *ENTRADA {sym} {direction} - {prob}% PROB NUEVOS OBJETIVOS*\n{optimo}\n*Prob total:* {prob}% = 40% historial ({win_rate}%) + 40% objetivos $10 ({prob_obj}%) + 20% mercado\n*Objetivo $10:* Se logro {prob_t1}% de veces en 10-15min en ultimas 200 velas\n*Mercado:* {market['trend']} racha UP:{market['up_streak']} | Vol: {market['volatility']}\n\n*ENTRY:* {real_price}\n*SL:* {sl} (-$10) | *TP1:* {tp1} (+$10 | {prob_t1}% prob)\n*TP2:* {tp2} (+$20) | *TP3:* {tp3} (+$30)\n⏱️ Duracion: 10-15 min | WinRate: {win_rate}%\n_Hora: {now.strftime('%H:%M:%S')} EC_"
             if send_telegram(msg):
                 conn = sqlite3.connect(DB_PATH); c=conn.cursor()
                 c.execute("INSERT INTO active_trades (symbol,direction,entry,sl,tp1,tp2,tp3,probability,status,created_at,last_price) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                          (sym,"BUY",real_price,sl,tp1,tp2,tp3,prob,"OPEN",now.isoformat(),real_price))
+                          (sym,direction,real_price,sl,tp1,tp2,tp3,prob,"OPEN",now.isoformat(),real_price))
                 conn.commit(); conn.close()
     check_active_trades_sync()
     return signals
@@ -354,25 +398,50 @@ def check_active_trades_sync():
             now = datetime.now(EC_TZ)
             if dir=="BUY":
                 if price <= sl and can_send_alert(sym, "SL"):
-                    send_telegram(f"❌ *STOP LOSS TOCADO - {sym}*\nENTRY: {entry} → SL: {sl}\nPrecio: {price}\nPerdida: -$10 ( -{abs(price-entry):.2f} USD)\nProb era: {prob}%\n_Hora: {now.strftime('%H:%M:%S')} EC_\nCerrando operacion")
+                    send_telegram(f"❌ *STOP LOSS TOCADO - {sym} {dir}*\nENTRY: {entry} → SL: {sl}\nPrecio: {price}\nPerdida: -$10 ( -{abs(price-entry):.2f} USD)\nProb era: {prob}%\n_Hora: {now.strftime('%H:%M:%S')} EC_\nCerrando operacion")
                     conn = sqlite3.connect(DB_PATH); c=conn.cursor()
                     c.execute("UPDATE active_trades SET status='SL_HIT', last_price=? WHERE id=?", (price,tid))
                     conn.commit(); conn.close()
                     update_stats(sym,"SL")
                 elif price >= tp1 and tp1_hit==0 and can_send_alert(sym, "TP1"):
-                    send_telegram(f"✅ *TP1 ALCANZADO - {sym}*\nENTRY: {entry} → TP1: {tp1}\nGanancia: +$10 (+{price-entry:.2f} USD)\nPrecio: {price}\nProb: {prob}% 🎯\nPuedes asegurar 50% y dejar correr a TP2/TP3\n_Hora: {now.strftime('%H:%M:%S')} EC_")
+                    send_telegram(f"✅ *TP1 ALCANZADO - {sym} {dir}*\nENTRY: {entry} → TP1: {tp1}\nGanancia: +$10 (+{price-entry:.2f} USD)\nPrecio: {price}\nProb: {prob}% 🎯\nPuedes asegurar 50% y dejar correr a TP2/TP3\n_Hora: {now.strftime('%H:%M:%S')} EC_")
                     conn = sqlite3.connect(DB_PATH); c=conn.cursor()
                     c.execute("UPDATE active_trades SET tp1_hit=1, last_price=? WHERE id=?", (price,tid))
                     conn.commit(); conn.close()
                     update_stats(sym,"TP1")
                 elif price >= tp2 and tp2_hit==0 and can_send_alert(sym, "TP2"):
-                    send_telegram(f"🎯🎯 *TP2 ALCANZADO - {sym}*\nENTRY: {entry} → TP2: {tp2}\nGanancia: +$20 (+{price-entry:.2f} USD) 💰💰\nPrecio: {price}\n_Hora: {now.strftime('%H:%M:%S')} EC_")
+                    send_telegram(f"🎯🎯 *TP2 ALCANZADO - {sym} {dir}*\nENTRY: {entry} → TP2: {tp2}\nGanancia: +$20 (+{price-entry:.2f} USD) 💰💰\nPrecio: {price}\n_Hora: {now.strftime('%H:%M:%S')} EC_")
                     conn = sqlite3.connect(DB_PATH); c=conn.cursor()
                     c.execute("UPDATE active_trades SET tp2_hit=1, last_price=? WHERE id=?", (price,tid))
                     conn.commit(); conn.close()
                     update_stats(sym,"TP2")
                 elif price >= tp3 and tp3_hit==0 and can_send_alert(sym, "TP3"):
-                    send_telegram(f"🚀🚀🚀 *TP3 ALCANZADO - {sym} MAX PROFIT*\nENTRY: {entry} → TP3: {tp3}\nGanancia TOTAL: +$30 (+{price-entry:.2f} USD) 🔥🔥🔥\nCerrando operacion ganadora\n_Hora: {now.strftime('%H:%M:%S')} EC_")
+                    send_telegram(f"🚀🚀🚀 *TP3 ALCANZADO - {sym} {dir} MAX PROFIT*\nENTRY: {entry} → TP3: {tp3}\nGanancia TOTAL: +$30 (+{price-entry:.2f} USD) 🔥🔥🔥\nCerrando operacion ganadora\n_Hora: {now.strftime('%H:%M:%S')} EC_")
+                    conn = sqlite3.connect(DB_PATH); c=conn.cursor()
+                    c.execute("UPDATE active_trades SET tp3_hit=1, status='TP3_HIT', last_price=? WHERE id=?", (price,tid))
+                    conn.commit(); conn.close()
+                    update_stats(sym,"TP3")
+            elif dir=="SELL":
+                if price >= sl and can_send_alert(sym, "SL"):
+                    send_telegram(f"❌ *STOP LOSS TOCADO - {sym} {dir}*\nENTRY: {entry} → SL: {sl}\nPrecio: {price}\nPerdida: -$10 (+{abs(price-entry):.2f} USD)\nProb era: {prob}%\n_Hora: {now.strftime('%H:%M:%S')} EC_\nCerrando operacion")
+                    conn = sqlite3.connect(DB_PATH); c=conn.cursor()
+                    c.execute("UPDATE active_trades SET status='SL_HIT', last_price=? WHERE id=?", (price,tid))
+                    conn.commit(); conn.close()
+                    update_stats(sym,"SL")
+                elif price <= tp1 and tp1_hit==0 and can_send_alert(sym, "TP1"):
+                    send_telegram(f"✅ *TP1 ALCANZADO - {sym} {dir}*\nENTRY: {entry} → TP1: {tp1}\nGanancia: +$10 ({entry-price:.2f} USD)\nPrecio: {price}\nProb: {prob}% 🎯\n_Hora: {now.strftime('%H:%M:%S')} EC_")
+                    conn = sqlite3.connect(DB_PATH); c=conn.cursor()
+                    c.execute("UPDATE active_trades SET tp1_hit=1, last_price=? WHERE id=?", (price,tid))
+                    conn.commit(); conn.close()
+                    update_stats(sym,"TP1")
+                elif price <= tp2 and tp2_hit==0 and can_send_alert(sym, "TP2"):
+                    send_telegram(f"🎯🎯 *TP2 ALCANZADO - {sym} {dir}*\nENTRY: {entry} → TP2: {tp2}\nGanancia: +$20 ({entry-price:.2f} USD) 💰💰\nPrecio: {price}\n_Hora: {now.strftime('%H:%M:%S')} EC_")
+                    conn = sqlite3.connect(DB_PATH); c=conn.cursor()
+                    c.execute("UPDATE active_trades SET tp2_hit=1, last_price=? WHERE id=?", (price,tid))
+                    conn.commit(); conn.close()
+                    update_stats(sym,"TP2")
+                elif price <= tp3 and tp3_hit==0 and can_send_alert(sym, "TP3"):
+                    send_telegram(f"🚀🚀🚀 *TP3 ALCANZADO - {sym} {dir} MAX PROFIT*\nENTRY: {entry} → TP3: {tp3}\nGanancia TOTAL: +$30 ({entry-price:.2f} USD) 🔥🔥🔥\nCerrando operacion ganadora\n_Hora: {now.strftime('%H:%M:%S')} EC_")
                     conn = sqlite3.connect(DB_PATH); c=conn.cursor()
                     c.execute("UPDATE active_trades SET tp3_hit=1, status='TP3_HIT', last_price=? WHERE id=?", (price,tid))
                     conn.commit(); conn.close()
@@ -405,6 +474,7 @@ async def webhook_tradingview(request: Request):
     try: data = await request.json()
     except: data={}
     symbol = str(data.get("symbol","XAUUSD")).upper(); action = str(data.get("action","BUY")).upper()
+    if action not in ["BUY","SELL"]: action = "BUY"
     price = float(data.get("price") or get_real_price(symbol))
     now = datetime.now(EC_TZ); market = analyze_market(symbol); prob, stats = calculate_probability(symbol, now.hour, market)
     sl, tp1, tp2, tp3, _, _ = calculate_tp_sl(price, symbol, action)

@@ -219,9 +219,13 @@ def analyze_gold_pro():
         elif current_price<sma10 and sma10<sma15 and sma15<sma30:
             sell_score+=3; points_detail.append({"side":"SELL","points":3,"name":"SMA BEAR FUERTE","reason":f"Precio {current_price:.2f} < SMA10 {sma10:.2f} < SMA15 {sma15:.2f} < SMA30 {sma30:.2f}"})
         elif current_price>sma10 and current_price>sma15:
-            buy_score+=1; points_detail.append({"side":"BUY","points":1,"name":"SMA BULL DEBIL","reason":f"Precio > SMA10 y SMA15"})
+            # No dar punto debil si hay expansion bajista fuerte (evita contradiccion)
+            if "EXPANSION_BAJISTA" not in phase_info["phase"]:
+                buy_score+=1; points_detail.append({"side":"BUY","points":1,"name":"SMA BULL DEBIL","reason":f"Precio {current_price:.2f} > SMA10 {sma10:.2f} y SMA15 {sma15:.2f}"})
         elif current_price<sma10 and current_price<sma15:
-            sell_score+=1; points_detail.append({"side":"SELL","points":1,"name":"SMA BEAR DEBIL","reason":f"Precio < SMA10 y SMA15"})
+            # No dar punto debil si hay expansion alcista fuerte (tu caso 7 vs 1)
+            if "EXPANSION_ALCISTA" not in phase_info["phase"]:
+                sell_score+=1; points_detail.append({"side":"SELL","points":1,"name":"SMA BEAR DEBIL","reason":f"Precio {current_price:.2f} < SMA10 {sma10:.2f} y SMA15 {sma15:.2f}"})
 
         # 2. RUPTURA ALTO 10MIN CON VELA FUERTE - TU SISTEMA
         if current_price>=high_10*0.998 and last_10["bullish"] and last_10["strong"]:
@@ -253,14 +257,17 @@ def analyze_gold_pro():
             else:
                 sell_score+=1; points_detail.append({"side":"SELL","points":1,"name":"VELA FUERTE BAJISTA","reason":f"Vela 10m bajista fuerte ratio {last_10['body_ratio']:.2f}"})
 
-        # 6. SESION NY 8-10 AM EC - TU SISTEMA
+        # 6. SESION NY 8-10 AM EC - TU SISTEMA - FIX: da +1 segun vela, no empate
         if ny_session:
-            if buy_score>sell_score:
-                buy_score+=1; points_detail.append({"side":"BUY","points":1,"name":"SESION NY 8-10AM EC","reason":"🔥 NY OPEN alta volatilidad oro alcista +1"})
-            elif sell_score>buy_score:
-                sell_score+=1; points_detail.append({"side":"SELL","points":1,"name":"SESION NY 8-10AM EC","reason":"🔥 NY OPEN alta volatilidad oro bajista +1"})
+            if last_10["bullish"]:
+                buy_score+=1; points_detail.append({"side":"BUY","points":1,"name":"SESION NY 8-10AM EC","reason":"🔥 NY OPEN 8-10AM EC - oro volatil, vela alcista +1 BUY"})
+            elif not last_10["bullish"]:
+                sell_score+=1; points_detail.append({"side":"SELL","points":1,"name":"SESION NY 8-10AM EC","reason":"🔥 NY OPEN 8-10AM EC - oro volatil, vela bajista +1 SELL"})
             else:
-                points_detail.append({"side":"NEUTRAL","points":0,"name":"SESION NY","reason":"NY activa - oro volatil 8-10AM EC"})
+                if buy_score>=sell_score:
+                    buy_score+=1; points_detail.append({"side":"BUY","points":1,"name":"SESION NY 8-10AM EC","reason":"🔥 NY OPEN alta volatilidad +1"})
+                else:
+                    sell_score+=1; points_detail.append({"side":"SELL","points":1,"name":"SESION NY 8-10AM EC","reason":"🔥 NY OPEN alta volatilidad +1"})
 
         # 7. 3 VELAS 15-30MIN CONFIRMADAS - TU SISTEMA
         if len(candles_15)>=2 and len(candles_30)>=1:
@@ -286,6 +293,12 @@ def analyze_gold_pro():
         elif "ACUMULACION" in phase_info["phase"]:
             points_detail.append({"side":"NEUTRAL","points":0,"name":phase_info["phase"],"reason":f"⏸️ {phase_info['desc']}"})
 
+        # RECALCULAR para evitar contradiccion visual: sumar de nuevo points_detail
+        real_buy = sum(p['points'] for p in points_detail if p['side']=='BUY')
+        real_sell = sum(p['points'] for p in points_detail if p['side']=='SELL')
+        # Ajustar si hubo supresion
+        buy_score = real_buy
+        sell_score = real_sell
         # DECIDIR DIRECCION Y ALERTA
         direction="BUY" if buy_score>=sell_score else "SELL"
         if buy_score>=sell_score+2:

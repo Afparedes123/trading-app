@@ -481,15 +481,23 @@ def signals_live():
         else:
             last=get_last_signal(); final_dir=last["direction"]
         hour=datetime.now(EC_TZ).hour
-        prob,stats,p1,p2,p3,wr_dir,wr_glob=calc_prob(hour, market)
+        # CALCULAR PROB BASADO EN FINAL_DIR para no cruzar SELL vs BUY
+        market_for_prob = dict(market)
+        market_for_prob['direction'] = final_dir
+        prob,stats,p1,p2,p3,wr_dir,wr_glob=calc_prob(hour, market_for_prob)
+        # Si es ENTRADA CONFIRMADA, el % de arriba debe ser la confianza de direccion, no solo TP1
+        display_prob = market.get('confidence', prob) if market.get('alert_type')=='ENTER' else prob
         sl,tp1,tp2,tp3,sl_d,tp1_d,tp2_d,tp3_d=calc_tp_sl(price, final_dir)
         if final_dir=="BUY":
             sl_exp=f"SL {sl} ABAJO (si baja {sl_d} pierdes $10)"; tp_exp=f"TP1 {tp1} ARRIBA (si sube {tp1_d} ganas $10) COMPRA"
         else:
             sl_exp=f"SL {sl} ARRIBA (si sube {sl_d} pierdes $10)"; tp_exp=f"TP1 {tp1} ABAJO (si baja {tp1_d} ganas $10) VENTA"
+        # Forzar que market_analysis tambien tenga final_dir para no mostrar BUY 84% cuando es SELL 57%
+        market['direction'] = final_dir
+        market['confidence'] = market.get('confidence', conf)
         signal={
             "symbol":"XAUUSD","direction":final_dir,"entry":price,"sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp3,"sl_distance":sl_d,"tp1_distance":tp1_d,
-            "probability":prob,"confidence":conf,"win_rate":wr_glob,"win_rate_direction":wr_dir,
+            "probability":display_prob,"confidence":conf,"probability_tp1":prob,"win_rate":wr_glob,"win_rate_direction":wr_dir,
             "win_rate_buy":round(stats.get("buy_wins",0)/max(stats.get("buy_total",1),1)*100,1),
             "win_rate_sell":round(stats.get("sell_wins",0)/max(stats.get("sell_total",1),1)*100,1),
             "is_optimal_hour":8<=hour<=10,"market_analysis":market,"phase":market.get("phase",""),"phase_desc":market.get("phase_desc",""),

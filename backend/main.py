@@ -381,21 +381,29 @@ def update_last_signal(direction, phase=""):
 def should_flip(new_dir, conf, market):
     try:
         last=get_last_signal()
-        if last["direction"]==new_dir: return True, "Misma dirección oro - continua"
-        if "EXPANSION" in market.get("phase","") and conf>=72:
-            return True, f"🔥 EXPANSION {market.get('phase')} tras acumulacion - cambio rapido {conf}%"
+        if last["direction"]==new_dir: return True, f"Misma dirección {new_dir} - continua"
+        buy_score=market.get("buy_score",0); sell_score=market.get("sell_score",0); diff=abs(buy_score-sell_score)
+        # FIX CRITICO: si hay diferencia de puntos >=2, permite flip inmediato sin esperar 12m
+        if diff>=2 and conf>=68:
+            return True, f"Flip rapido Score {buy_score}B/{sell_score}S diff {diff} + conf {conf}% - cambio a {new_dir}"
+        if "EXPANSION" in market.get("phase","") and conf>=70:
+            return True, f"🔥 EXPANSION {market.get('phase')} - cambio rapido {conf}% a {new_dir}"
+        if "TENDENCIA" in market.get("phase","") and diff>=2:
+            return True, f"TENDENCIA {market.get('phase')} + diff {diff} - cambio a {new_dir}"
         conn=sqlite3.connect(DB_PATH); c=conn.cursor()
         c.execute("SELECT confirmed_at FROM last_signal WHERE symbol='XAUUSD'")
         row=c.fetchone(); conn.close()
         if row:
             last_time=datetime.fromisoformat(row[0])
             mins=(datetime.now(EC_TZ)-last_time).total_seconds()/60
-            if mins<12 and conf<78: return False, f"Fase {market.get('phase')} esperando 12m (van {mins:.1f}m) conf {conf}%"
-            if conf>=80: return True, f"Alta confianza {conf}% + fase {market.get('phase')}"
-            if mins>=15: return True, f"Cambio tras {mins:.1f}m + fase {market.get('phase')}"
-        if conf>=72: return True, f"Confianza {conf}% + fase {market.get('phase')}"
+            if mins<5 and conf<65 and diff<2:
+                return False, f"Esperando 5m (van {mins:.1f}m) conf {conf}% diff {diff} - manteniendo {last['direction']}"
+            if conf>=75: return True, f"Alta confianza {conf}% + fase {market.get('phase')} a {new_dir}"
+            if mins>=5: return True, f"Cambio tras {mins:.1f}m + fase {market.get('phase')} a {new_dir}"
+        if conf>=68: return True, f"Confianza {conf}% + fase {market.get('phase')} a {new_dir}"
         return False, f"Confianza baja {conf}% manteniendo {last['direction']} fase {last.get('phase','')}"
-    except: return True, "Error permitiendo cambio"
+    except Exception as e:
+        return True, f"Error {e} permitiendo cambio a {new_dir}"
 
 def calc_tp_sl(entry, direction="BUY"):
     TARGET=10.0; PER=1.62
@@ -505,8 +513,13 @@ def signals_live():
             sl_exp=f"SL {sl} ABAJO (si baja {sl_d} pierdes $10)"; tp_exp=f"TP1 {tp1} ARRIBA (si sube {tp1_d} ganas $10) COMPRA"
         else:
             sl_exp=f"SL {sl} ARRIBA (si sube {sl_d} pierdes $10)"; tp_exp=f"TP1 {tp1} ABAJO (si baja {tp1_d} ganas $10) VENTA"
-        # Forzar que market_analysis tambien tenga final_dir para no mostrar BUY 84% cuando es SELL 57%
+        # FIX: Forzar que market_analysis y alerta coincidan con final_dir - evita SELL arriba y BUY abajo
         market['direction'] = final_dir
+        # Si final_dir es distinto al new_dir, la alerta debe decir que mantiene, no que entra al contrario
+        if final_dir != new_dir:
+            market['alert'] = f"⏸️ MANTENIENDO {final_dir} - señal {new_dir} en espera ({flip_reason})"
+            market['alert_type'] = "WAIT"
+            market['alert_desc'] = f"Score {market.get('buy_score')}B/{market.get('sell_score')}S quiere {new_dir} pero mantiene {final_dir} - {flip_reason}"
         market['confidence'] = market.get('confidence', conf)
         signal={
             "symbol":"XAUUSD","direction":final_dir,"entry":price,"sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp3,"sl_distance":sl_d,"tp1_distance":tp1_d,

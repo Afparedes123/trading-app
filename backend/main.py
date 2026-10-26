@@ -175,36 +175,36 @@ def detect_phase(candles_10, candles_15, rows):
         return {"phase":"RANGO","desc":f"RANGO estrecho {band:.1f} USD - balance, esperar ruptura","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":slope,"is_acc":False,"is_exp":False}
     return {"phase":"TRANSICION","desc":f"TRANSICION - vol {avg3:.1f} USD, pendiente {slope:.2f}","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":slope,"is_acc":False,"is_exp":False}
 
+
 def analyze_gold_pro():
     try:
         rows=get_gold_history(300)
         price_fallback=get_gold_price()
-        if len(rows)<10:
+        if len(rows)<15:
             return {"trend":"INICIO","direction":"BUY","confidence":55,"phase":"INICIO","phase_desc":"Iniciando - precio actual","alert":"ESPERA - INICIANDO","alert_type":"WAIT","points_detail":[],"candle_patterns":[],"high_10":price_fallback+3.5,"low_10":price_fallback-3.2,"high_15":price_fallback+5.8,"low_15":price_fallback-5.1,"high_30":price_fallback+8.5,"low_30":price_fallback-8.2,"sma10":price_fallback-0.8,"sma15":price_fallback-1.2,"sma30":price_fallback-1.8,"support":price_fallback-5.1,"resistance":price_fallback+5.8,"volatility":3.2,"ny_session":False,"buy_score":0,"sell_score":0,"up_streak":0,"down_streak":0,"current_price":price_fallback}
+        
         candles_10=build_candles(rows,20); candles_15=build_candles(rows,30); candles_30=build_candles(rows,60)
-        if len(candles_10)<4:
-            fallback=rows[-1][0] if rows else price_fallback
-            high_est=max([r[0] for r in rows[-20:]]) if len(rows)>=20 else fallback+3.5
-            low_est=min([r[0] for r in rows[-20:]]) if len(rows)>=20 else fallback-3.2
-            sma_est=sum([r[0] for r in rows[-10:]])/min(len(rows),10) if rows else fallback
-            return {"trend":"FORMANDO","direction":"BUY","confidence":56,"phase":"FORMANDO","phase_desc":f"Formando velas {len(candles_10)} 10m","alert":"ESPERA - FORMANDO VELAS","alert_type":"WAIT","points_detail":[],"candle_patterns":[],"high_10":high_est,"low_10":low_est,"high_15":high_est+1.5,"low_15":low_est-1.5,"high_30":high_est+2.5,"low_30":low_est-2.5,"sma10":sma_est,"sma15":sma_est-0.5,"sma30":sma_est-1.0,"support":low_est,"resistance":high_est,"volatility":high_est-low_est,"ny_session":False,"buy_score":0,"sell_score":0,"up_streak":0,"down_streak":0,"current_price":fallback}
-
         current_price=rows[-1][0]
-        last_10=candles_10[-1]; prev_10=candles_10[-2]
-        last_15=candles_15[-1] if candles_15 else last_10
-        prev_15=candles_15[-2] if len(candles_15)>=2 else last_10
-        last_30=candles_30[-1] if candles_30 else last_15
-
-        closes_10=[c["close"] for c in candles_10[-5:]]
-        closes_15=[c["close"] for c in candles_15[-4:]] if candles_15 else closes_10
-        closes_30=[c["close"] for c in candles_30[-3:]] if candles_30 else closes_15
-        sma10=sum(closes_10)/len(closes_10); sma15=sum(closes_15)/len(closes_15); sma30=sum(closes_30)/len(closes_30)
-
-        high_10=max([c["high"] for c in candles_10[-3:]]); low_10=min([c["low"] for c in candles_10[-3:]])
-        high_15=max([c["high"] for c in candles_15[-3:]]) if candles_15 else high_10; low_15=min([c["low"] for c in candles_15[-3:]]) if candles_15 else low_10
-        high_30=max([c["high"] for c in candles_30[-2:]]) if candles_30 else high_15; low_30=min([c["low"] for c in candles_30[-2:]]) if candles_30 else low_15
+        prices = [r[0] for r in rows]
+        
+        # SMA RESPONSIVE - directo de precios, no de velas, para no ir atrasado como en tu foto
+        sma10 = sum(prices[-10:])/10 if len(prices)>=10 else current_price
+        sma15 = sum(prices[-15:])/15 if len(prices)>=15 else current_price
+        sma30 = sum(prices[-30:])/30 if len(prices)>=30 else current_price
+        
+        # HIGH/LOW REAL - ultimas 30 velas sin contar la actual, para detectar ruptura real como TradingView
+        recent_prices = prices[-31:-1] if len(prices)>=31 else prices[:-1]
+        high_recent = max(recent_prices) if recent_prices else current_price+3
+        low_recent = min(recent_prices) if recent_prices else current_price-3
+        high_10 = max([c["high"] for c in candles_10[-3:]]) if len(candles_10)>=3 else high_recent
+        low_10 = min([c["low"] for c in candles_10[-3:]]) if len(candles_10)>=3 else low_recent
+        high_15 = max([c["high"] for c in candles_15[-2:]]) if len(candles_15)>=2 else high_recent+1.5
+        low_15 = min([c["low"] for c in candles_15[-2:]]) if len(candles_15)>=2 else low_recent-1.5
+        high_30 = max([c["high"] for c in candles_30[-2:]]) if len(candles_30)>=2 else high_15+1
+        low_30 = min([c["low"] for c in candles_30[-2:]]) if len(candles_30)>=2 else low_15-1
+        
         support=low_15; resistance=high_15
-
+        
         phase_info=detect_phase(candles_10,candles_15,rows)
         candle_pats=detect_candle_patterns(candles_10)+detect_candle_patterns(candles_15)
 
@@ -213,70 +213,71 @@ def analyze_gold_pro():
 
         buy_score=0; sell_score=0; points_detail=[]
 
-        # 1. SMA 10>15>30 - TU SISTEMA PUNTOS
+        # CORRECCION CRITICA: Ruptura REAL vs TradingView - compara precio actual vs max/min ultimas 30 sin contar actual
+        is_break_high = current_price >= high_recent * 0.999
+        is_break_low = current_price <= low_recent * 1.001
+        last_10 = candles_10[-1] if candles_10 else {"bullish":True,"strong":False,"body":1,"body_ratio":0.5,"range":2}
+        prev_10 = candles_10[-2] if len(candles_10)>=2 else last_10
+        last_15 = candles_15[-1] if candles_15 else last_10
+        prev_15 = candles_15[-2] if len(candles_15)>=2 else last_10
+        last_30 = candles_30[-1] if candles_30 else last_15
+
+        # 1. SMA - VERSION RESPONSIVE
         if current_price>sma10 and sma10>sma15 and sma15>sma30:
-            buy_score+=3; points_detail.append({"side":"BUY","points":3,"name":"SMA BULL FUERTE","reason":f"Precio {current_price:.2f} > SMA10 {sma10:.2f} > SMA15 {sma15:.2f} > SMA30 {sma30:.2f}"})
+            buy_score+=3; points_detail.append({"side":"BUY","points":3,"name":"SMA BULL FUERTE","reason":f"Precio {current_price:.2f} > SMA10 {sma10:.2f} > SMA15 {sma15:.2f} > SMA30 {sma30:.2f} - tendencia alcista fuerte"})
         elif current_price<sma10 and sma10<sma15 and sma15<sma30:
-            sell_score+=3; points_detail.append({"side":"SELL","points":3,"name":"SMA BEAR FUERTE","reason":f"Precio {current_price:.2f} < SMA10 {sma10:.2f} < SMA15 {sma15:.2f} < SMA30 {sma30:.2f}"})
+            sell_score+=3; points_detail.append({"side":"SELL","points":3,"name":"SMA BEAR FUERTE","reason":f"Precio {current_price:.2f} < SMA10 {sma10:.2f} < SMA15 {sma15:.2f} < SMA30 {sma30:.2f} - tendencia bajista fuerte"})
         elif current_price>sma10 and current_price>sma15:
-            # No dar punto debil si hay expansion bajista fuerte (evita contradiccion)
-            if "EXPANSION_BAJISTA" not in phase_info["phase"]:
-                buy_score+=1; points_detail.append({"side":"BUY","points":1,"name":"SMA BULL DEBIL","reason":f"Precio {current_price:.2f} > SMA10 {sma10:.2f} y SMA15 {sma15:.2f}"})
+            buy_score+=1; points_detail.append({"side":"BUY","points":1,"name":"SMA BULL DEBIL","reason":f"Precio {current_price:.2f} > SMA10 {sma10:.2f} y SMA15 {sma15:.2f}"})
         elif current_price<sma10 and current_price<sma15:
-            # No dar punto debil si hay expansion alcista fuerte (tu caso 7 vs 1)
-            if "EXPANSION_ALCISTA" not in phase_info["phase"]:
-                sell_score+=1; points_detail.append({"side":"SELL","points":1,"name":"SMA BEAR DEBIL","reason":f"Precio {current_price:.2f} < SMA10 {sma10:.2f} y SMA15 {sma15:.2f}"})
+            sell_score+=1; points_detail.append({"side":"SELL","points":1,"name":"SMA BEAR DEBIL","reason":f"Precio {current_price:.2f} < SMA10 {sma10:.2f} y SMA15 {sma15:.2f}"})
 
-        # 2. RUPTURA ALTO 10MIN CON VELA FUERTE - TU SISTEMA
-        if current_price>=high_10*0.998 and last_10["bullish"] and last_10["strong"]:
-            buy_score+=3; points_detail.append({"side":"BUY","points":3,"name":"BREAK HIGH 10m FUERTE","reason":f"🔥 Ruptura alto 10m {high_10:.2f} vela cuerpo {last_10['body']:.2f} ratio {last_10['body_ratio']:.2f} >0.6"})
-        if current_price<=low_10*1.002 and not last_10["bullish"] and last_10["strong"]:
-            sell_score+=3; points_detail.append({"side":"SELL","points":3,"name":"BREAK LOW 10m FUERTE","reason":f"🔥 Ruptura bajo 10m {low_10:.2f} vela fuerte {last_10['body']:.2f}"})
+        # 2. RUPTURA - FIX PARA TU FOTO: ruptura real como TradingView
+        if is_break_high and last_10["bullish"]:
+            pts = 3 if last_10["strong"] else 2
+            buy_score+=pts; points_detail.append({"side":"BUY","points":pts,"name":"BREAK HIGH 10m FUERTE" if last_10["strong"] else "BREAK HIGH 10m","reason":f"🔥 Ruptura ALTO real {high_recent:.2f} -> {current_price:.2f} (+{current_price-high_recent:.2f}) vela {'fuerte' if last_10['strong'] else ''} {last_10['body']:.2f} USD - como en TradingView"})
+        if is_break_low and not last_10["bullish"]:
+            pts = 3 if last_10["strong"] else 2
+            sell_score+=pts; points_detail.append({"side":"SELL","points":pts,"name":"BREAK LOW 10m FUERTE" if last_10["strong"] else "BREAK LOW 10m","reason":f"🔥 Ruptura BAJO real {low_recent:.2f} -> {current_price:.2f} ({current_price-low_recent:.2f}) vela fuerte {last_10['body']:.2f}"})
 
-        # 3. CERCA RESISTENCIA 15MIN - TU SISTEMA
-        if abs(current_price-high_15) < 2.0:
-            buy_score+=2; points_detail.append({"side":"BUY","points":2,"name":"CERCA RESISTENCIA 15m","reason":f"Precio {current_price:.2f} cerca resistencia 15m {high_15:.2f} a {high_15-current_price:.2f} USD - posible breakout"})
-        if abs(current_price-low_15) < 2.0:
-            sell_score+=2; points_detail.append({"side":"SELL","points":2,"name":"CERCA SOPORTE 15m","reason":f"Precio {current_price:.2f} cerca soporte 15m {low_15:.2f} a {current_price-low_15:.2f} USD"})
+        # 3. CERCA RESISTENCIA/SOPORTE
+        if abs(current_price-high_15) < 2.5 and current_price < high_15 + 1.0:
+            buy_score+=2; points_detail.append({"side":"BUY","points":2,"name":"CERCA RESISTENCIA 15m","reason":f"Precio {current_price:.2f} cerca resistencia 15m {high_15:.2f} a {high_15-current_price:.2f} USD - posible breakout ALCISTA"})
+        if abs(current_price-low_15) < 2.5 and current_price > low_15 - 1.0:
+            sell_score+=2; points_detail.append({"side":"SELL","points":2,"name":"CERCA SOPORTE 15m","reason":f"Precio {current_price:.2f} cerca soporte 15m {low_15:.2f} a {current_price-low_15:.2f} USD - posible breakdown"})
 
-        # 4. RACHA 3 VELAS 10MIN - TU SISTEMA
+        # 4. RACHA
         up_streak=phase_info["up"]; down_streak=phase_info["down"]
         if up_streak>=3:
-            buy_score+=2; points_detail.append({"side":"BUY","points":2,"name":f"RACHA {up_streak} VELAS ALCISTAS 10m","reason":f"Racha alcista {up_streak} velas 10min oro consecutivas"})
+            buy_score+=2; points_detail.append({"side":"BUY","points":2,"name":f"RACHA {up_streak} VELAS ALCISTAS 10m","reason":f"Racha alcista {up_streak} velas 10min oro"})
         elif up_streak>=2:
-            buy_score+=1; points_detail.append({"side":"BUY","points":1,"name":f"RACHA {up_streak} VELAS","reason":f"{up_streak} velas alcistas"})
+            buy_score+=1; points_detail.append({"side":"BUY","points":1,"name":f"RACHA {up_streak} VELAS ALCISTAS","reason":f"{up_streak} velas alcistas"})
         if down_streak>=3:
             sell_score+=2; points_detail.append({"side":"SELL","points":2,"name":f"RACHA {down_streak} VELAS BAJISTAS 10m","reason":f"Racha bajista {down_streak} velas 10min"})
         elif down_streak>=2:
             sell_score+=1; points_detail.append({"side":"SELL","points":1,"name":f"RACHA {down_streak} BAJISTAS","reason":f"{down_streak} velas bajistas"})
 
-        # 5. VELA FUERTE - TU SISTEMA
+        # 5. VELA FUERTE
         if last_10["strong"]:
             if last_10["bullish"]:
-                buy_score+=1; points_detail.append({"side":"BUY","points":1,"name":"VELA FUERTE ALCISTA","reason":f"Vela 10m alcista fuerte ratio {last_10['body_ratio']:.2f} cuerpo {last_10['body']:.2f}"})
+                buy_score+=1; points_detail.append({"side":"BUY","points":1,"name":"VELA FUERTE ALCISTA","reason":f"Vela 10m alcista fuerte ratio {last_10['body_ratio']:.2f} cuerpo {last_10['body']:.2f} USD"})
             else:
-                sell_score+=1; points_detail.append({"side":"SELL","points":1,"name":"VELA FUERTE BAJISTA","reason":f"Vela 10m bajista fuerte ratio {last_10['body_ratio']:.2f}"})
+                sell_score+=1; points_detail.append({"side":"SELL","points":1,"name":"VELA FUERTE BAJISTA","reason":f"Vela 10m bajista fuerte ratio {last_10['body_ratio']:.2f} cuerpo {last_10['body']:.2f}"})
 
-        # 6. SESION NY 8-10 AM EC - TU SISTEMA - FIX: da +1 segun vela, no empate
+        # 6. NY
         if ny_session:
             if last_10["bullish"]:
-                buy_score+=1; points_detail.append({"side":"BUY","points":1,"name":"SESION NY 8-10AM EC","reason":"🔥 NY OPEN 8-10AM EC - oro volatil, vela alcista +1 BUY"})
-            elif not last_10["bullish"]:
-                sell_score+=1; points_detail.append({"side":"SELL","points":1,"name":"SESION NY 8-10AM EC","reason":"🔥 NY OPEN 8-10AM EC - oro volatil, vela bajista +1 SELL"})
+                buy_score+=1; points_detail.append({"side":"BUY","points":1,"name":"SESION NY 8-10AM EC","reason":"🔥 NY OPEN - vela alcista +1 BUY"})
             else:
-                if buy_score>=sell_score:
-                    buy_score+=1; points_detail.append({"side":"BUY","points":1,"name":"SESION NY 8-10AM EC","reason":"🔥 NY OPEN alta volatilidad +1"})
-                else:
-                    sell_score+=1; points_detail.append({"side":"SELL","points":1,"name":"SESION NY 8-10AM EC","reason":"🔥 NY OPEN alta volatilidad +1"})
+                sell_score+=1; points_detail.append({"side":"SELL","points":1,"name":"SESION NY 8-10AM EC","reason":"🔥 NY OPEN - vela bajista +1 SELL"})
 
-        # 7. 3 VELAS 15-30MIN CONFIRMADAS - TU SISTEMA
+        # 7. 15-30m
         if len(candles_15)>=2 and len(candles_30)>=1:
             if last_15["bullish"] and prev_15["bullish"] and last_30["bullish"]:
-                buy_score+=2; points_detail.append({"side":"BUY","points":2,"name":"3 VELAS 15-30m ALCISTAS CONFIRMADAS","reason":"3 velas 15-30min alcistas confirmadas - tendencia mayor alcista"})
+                buy_score+=2; points_detail.append({"side":"BUY","points":2,"name":"3 VELAS 15-30m ALCISTAS CONFIRMADAS","reason":"3 velas 15-30min alcistas - tendencia mayor alcista como TradingView"})
             if not last_15["bullish"] and not prev_15["bullish"] and not last_30["bullish"]:
                 sell_score+=2; points_detail.append({"side":"SELL","points":2,"name":"3 VELAS 15-30m BAJISTAS CONFIRMADAS","reason":"3 velas 15-30min bajistas confirmadas"})
 
-        # EXTRA: PATRONES VELAS JAPONESAS - BONUS PARA SEÑALES LIMPIAS
         for pat in candle_pats:
             if pat["dir"]=="BUY":
                 buy_score+=pat["strength"]
@@ -285,70 +286,51 @@ def analyze_gold_pro():
                 sell_score+=pat["strength"]
                 points_detail.append({"side":"SELL","points":pat["strength"],"name":pat["name"],"reason":f"🕯️ {pat['desc']}"})
 
-        # EXTRA: FASE BONUS
         if "EXPANSION_ALCISTA" in phase_info["phase"]:
             buy_score+=2; points_detail.append({"side":"BUY","points":2,"name":"FASE EXPANSION ALCISTA","reason":f"🔥 {phase_info['desc']}"})
         elif "EXPANSION_BAJISTA" in phase_info["phase"]:
             sell_score+=2; points_detail.append({"side":"SELL","points":2,"name":"FASE EXPANSION BAJISTA","reason":f"🔥 {phase_info['desc']}"})
-        elif "ACUMULACION" in phase_info["phase"]:
-            points_detail.append({"side":"NEUTRAL","points":0,"name":phase_info["phase"],"reason":f"⏸️ {phase_info['desc']}"})
 
-        # RECALCULAR para evitar contradiccion visual: sumar de nuevo points_detail
         real_buy = sum(p['points'] for p in points_detail if p['side']=='BUY')
         real_sell = sum(p['points'] for p in points_detail if p['side']=='SELL')
-        # Ajustar si hubo supresion
-        buy_score = real_buy
-        sell_score = real_sell
-        # DECIDIR DIRECCION Y ALERTA
+        buy_score = real_buy; sell_score = real_sell
+
         direction="BUY" if buy_score>=sell_score else "SELL"
         if buy_score>=sell_score+2:
-            direction="BUY"
-            base_conf=62
+            direction="BUY"; base_conf=62
             if "EXPANSION" in phase_info["phase"]: base_conf=78
             elif any(p["strength"]>=2 for p in candle_pats): base_conf=68
             confidence=base_conf+min(buy_score*2,16)
         elif sell_score>=buy_score+2:
-            direction="SELL"
-            base_conf=62
+            direction="SELL"; base_conf=62
             if "EXPANSION" in phase_info["phase"]: base_conf=78
             elif any(p["strength"]>=2 for p in candle_pats): base_conf=68
             confidence=base_conf+min(sell_score*2,16)
         else:
-            direction="BUY" if current_price>sma15 else "SELL"
-            confidence=56
+            direction="BUY" if current_price>sma15 else "SELL"; confidence=56
 
-        # ALERTA ENTRA / ESPERA
         if "ACUMULACION" in phase_info["phase"] and not "EXPANSION" in phase_info["phase"]:
-            alert="⛔ ESPERA - NO ENTRES - FASE ACUMULACION"
-            alert_type="WAIT"
-            alert_desc=f"Acumulacion pura rango {phase_info['band']:.1f} USD - NO operar, esperar PICO tras acumulacion como hoy. Score {buy_score}B/{sell_score}S insuficiente"
-        elif "EXPANSION" in phase_info["phase"] and confidence>=72 and len([p for p in candle_pats if p["strength"]>=2])>0:
-            alert="✅ ENTRA - PICO TRAS ACUMULACION + VELA CONFIRMADA - SEÑAL LIMPIA"
-            alert_type="ENTER"
-            alert_desc=f"{phase_info['phase']} + vela {candle_pats[0]['name'] if candle_pats else ''} - señal limpia {confidence}%"
-        elif confidence>=75 and abs(buy_score-sell_score)>=3:
-            alert=f"✅ ENTRA - {direction} CONFIRMADO - TENDENCIA FUERTE"
-            alert_type="ENTER"
-            alert_desc=f"Score {buy_score if direction=='BUY' else sell_score} vs {sell_score if direction=='BUY' else buy_score} - confianza {confidence}%"
-        elif confidence>=65 and abs(buy_score-sell_score)>=2:
-            alert=f"⚠️ ENTRA CON PRECAUCION - {direction} - CONFIRMACION MEDIA"
-            alert_type="CAUTION"
-            alert_desc=f"Score {buy_score}B/{sell_score}S - espera vela fuerte para confirmar"
+            alert="⛔ ESPERA - NO ENTRES - FASE ACUMULACION"; alert_type="WAIT"; alert_desc=f"Acumulacion rango {phase_info['band']:.1f} USD - NO operar, esperar PICO. Score {buy_score}B/{sell_score}S"
+        elif "EXPANSION" in phase_info["phase"] and confidence>=70 and len([p for p in candle_pats if p["strength"]>=1])>0:
+            alert=f"✅ ENTRA - PICO TRAS ACUMULACION + VELA CONFIRMADA - {direction} - SEÑAL LIMPIA"; alert_type="ENTER"; alert_desc=f"{phase_info['phase']} + vela {candle_pats[0]['name'] if candle_pats else ''} - señal limpia {confidence}% - Score {buy_score}B/{sell_score}S - como TradingView"
+        elif confidence>=72 and abs(buy_score-sell_score)>=2:
+            alert=f"✅ ENTRA - {direction} CONFIRMADO - TENDENCIA FUERTE"; alert_type="ENTER"; alert_desc=f"Score {buy_score if direction=='BUY' else sell_score} vs {sell_score if direction=='BUY' else buy_score} - confianza {confidence}% - coincide con ruptura TradingView"
+        elif confidence>=62 and abs(buy_score-sell_score)>=1:
+            alert=f"⚠️ ENTRA CON PRECAUCION - {direction} - CONFIRMACION MEDIA"; alert_type="CAUTION"; alert_desc=f"Score {buy_score}B/{sell_score}S - espera vela fuerte para confirmar"
         else:
-            alert="⛔ ESPERA - SEÑAL DEBIL - RANGO O ACUMULACION"
-            alert_type="WAIT"
-            alert_desc=f"Score igualado {buy_score}B/{sell_score}S - fase {phase_info['phase']} - esperar breakout limpio"
+            alert="⛔ ESPERA - SEÑAL DEBIL - RANGO"; alert_type="WAIT"; alert_desc=f"Score igualado {buy_score}B/{sell_score}S - fase {phase_info['phase']} - esperar breakout"
 
         trend="BULLISH" if direction=="BUY" else "BEARISH"
         if abs(buy_score-sell_score)<=1: trend="LATERAL"
 
         return {
-            "trend":trend,"direction":direction,"confidence":min(confidence,94),
+            "trend":trend,"direction":direction,"confidence":min(confidence,95),
             "pattern":phase_info["phase"],"phase":phase_info["phase"],"phase_desc":phase_info["desc"],
             "phase_info":phase_info,"alert":alert,"alert_type":alert_type,"alert_desc":alert_desc,
             "candle_patterns":candle_pats,"points_detail":points_detail,
             "reason":" | ".join([p["name"] for p in points_detail[:3]]),
             "high_10":high_10,"low_10":low_10,"high_15":high_15,"low_15":low_15,"high_30":high_30,"low_30":low_30,
+            "high_recent":high_recent,"low_recent":low_recent,
             "sma10":sma10,"sma15":sma15,"sma30":sma30,"support":support,"resistance":resistance,
             "up_streak":up_streak,"down_streak":down_streak,"volatility":phase_info["avg3"],"volatility_15":phase_info["avg6"],
             "ny_session":ny_session,"buy_score":buy_score,"sell_score":sell_score,
@@ -357,6 +339,7 @@ def analyze_gold_pro():
     except Exception as e:
         print(f"analyze error {e}"); import traceback; traceback.print_exc()
         return {"trend":"ERROR","direction":"BUY","confidence":50,"phase":"ERROR","phase_desc":str(e),"alert":"ESPERA - ERROR","alert_type":"WAIT","alert_desc":str(e),"points_detail":[],"candle_patterns":[],"high_10":0,"low_10":0,"high_15":0,"low_15":0,"high_30":0,"low_30":0,"sma10":0,"sma15":0,"sma30":0,"support":0,"resistance":0,"volatility":0,"ny_session":False,"buy_score":0,"sell_score":0}
+
 
 def get_last_signal():
     try:

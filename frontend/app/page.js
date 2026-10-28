@@ -188,7 +188,19 @@ export default function Page() {
                   <div style={{ color: "#c084fc", fontWeight: "700" }}>📐 FIB {s.market_analysis?.fib?.dir} {s.market_analysis?.fib?.range?.toFixed(1)} USD</div>
                   <div>Impulso {s.market_analysis?.fib?.low?.toFixed(2)} → {s.market_analysis?.fib?.high?.toFixed(2)}</div>
                   <div>0.382: {s.market_analysis?.fib?.levels?.["0.382"]?.toFixed(2)} | 0.5: {s.market_analysis?.fib?.levels?.["0.5"]?.toFixed(2)} | 0.618: <b style={{ color: "#fbbf24" }}>{s.market_analysis?.fib?.levels?.["0.618"]?.toFixed(2)}</b></div>
-                  {s.market_analysis?.fib?.near && <div style={{ color: "#fbbf24" }}>Cerca Fib {s.market_analysis?.fib?.near} a {s.market_analysis?.fib?.dist?.toFixed(2)} USD</div>}
+                  {s.market_analysis?.fib?.near && <div style={{ color: "#fbbf24" }}>Cerca Fib {s.market_analysis?.fib?.near} a {s.market_analysis?.fib?.dist?.toFixed(2)} USD - {s.market_analysis?.fib?.near === "0.618" || s.market_analysis?.fib?.near === "0.5" ? "ZONA ENTRADA" : "retroceso"}</div>}
+                </div>
+              )}
+              {s.market_analysis?.high_clusters?.length > 0 && (
+                <div style={{ marginTop: "4px", background: "rgba(239,68,68,0.08)", borderRadius: "6px", padding: "4px", fontSize: "9px" }}>
+                  <div style={{ color: "#ef4444", fontWeight: "700" }}>🔴 Resistencias detectadas (como tu foto)</div>
+                  {s.market_analysis?.high_clusters?.map((c,i) => <div key={i}>R{i+1}: {c[0].toFixed(2)} - {c[1]} toques</div>)}
+                </div>
+              )}
+              {s.market_analysis?.low_clusters?.length > 0 && (
+                <div style={{ marginTop: "4px", background: "rgba(34,197,94,0.08)", borderRadius: "6px", padding: "4px", fontSize: "9px" }}>
+                  <div style={{ color: "#22c55e", fontWeight: "700" }}>🟢 Soportes detectados</div>
+                  {s.market_analysis?.low_clusters?.map((c,i) => <div key={i}>S{i+1}: {c[0].toFixed(2)} - {c[1]} toques</div>)}
                 </div>
               )}
               <div>Vol: {s.market_analysis?.volatility?.toFixed(1)} USD | {s.flip_reason}</div>

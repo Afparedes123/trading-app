@@ -173,14 +173,24 @@ export default function Page() {
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "10px" }}>
             <div style={{ background: "#0c0a09", border: "1px solid #292524", borderRadius: "8px", padding: "8px", fontSize: "10px" }}>
-              <div style={{ color: "#a8a29e", fontWeight: "700" }}>📊 10-15-30 MIN</div>
+              <div style={{ color: "#a8a29e", fontWeight: "700" }}>📊 10-15-30 MIN + SR 4H</div>
               <div>Alto 10m: {s.market_analysis?.high_10?.toFixed(2)} | Bajo 10m: {s.market_analysis?.low_10?.toFixed(2)}</div>
               <div>Alto 15m: <b style={{ color: "#fbbf24" }}>{s.market_analysis?.high_15?.toFixed(2)}</b> | Bajo 15m: <b style={{ color: "#fbbf24" }}>{s.market_analysis?.low_15?.toFixed(2)}</b></div>
+              <div style={{ borderTop: "1px solid #292524", marginTop: "4px", paddingTop: "4px" }}>SR 4H: <b style={{ color: "#a78bfa" }}>{s.market_analysis?.low_long?.toFixed(2)} - {s.market_analysis?.high_long?.toFixed(2)}</b> ({s.market_analysis?.band_long?.toFixed(1)} USD) {s.market_analysis?.band_long < 7 ? "📦 ACUM LARGA" : ""}</div>
               <div>SMA: {s.market_analysis?.sma10?.toFixed(1)}/{s.market_analysis?.sma15?.toFixed(1)}/{s.market_analysis?.sma30?.toFixed(1)}</div>
             </div>
             <div style={{ background: "#0c0a09", border: "1px solid #292524", borderRadius: "8px", padding: "8px", fontSize: "10px" }}>
-              <div style={{ color: "#a8a29e", fontWeight: "700" }}>🎯 SOPORTE / RESISTENCIA</div>
-              <div>Soporte: <b style={{ color: "#10b981" }}>{s.support?.toFixed(2)}</b> | Resistencia: <b style={{ color: "#ef4444" }}>{s.resistance?.toFixed(2)}</b></div>
+              <div style={{ color: "#a8a29e", fontWeight: "700" }}>🎯 SOPORTE / RESISTENCIA + FIB</div>
+              <div>Soporte 15m: <b style={{ color: "#10b981" }}>{s.support?.toFixed(2)}</b> | Res 15m: <b style={{ color: "#ef4444" }}>{s.resistance?.toFixed(2)}</b></div>
+              <div>SR 4H: <b style={{ color: "#a78bfa" }}>{s.market_analysis?.support_long?.toFixed(2)} - {s.market_analysis?.resistance_long?.toFixed(2)}</b></div>
+              {s.market_analysis?.fib && (
+                <div style={{ marginTop: "4px", background: "rgba(168,85,247,0.1)", borderRadius: "6px", padding: "4px" }}>
+                  <div style={{ color: "#c084fc", fontWeight: "700" }}>📐 FIB {s.market_analysis?.fib?.dir} {s.market_analysis?.fib?.range?.toFixed(1)} USD</div>
+                  <div>Impulso {s.market_analysis?.fib?.low?.toFixed(2)} → {s.market_analysis?.fib?.high?.toFixed(2)}</div>
+                  <div>0.382: {s.market_analysis?.fib?.levels?.["0.382"]?.toFixed(2)} | 0.5: {s.market_analysis?.fib?.levels?.["0.5"]?.toFixed(2)} | 0.618: <b style={{ color: "#fbbf24" }}>{s.market_analysis?.fib?.levels?.["0.618"]?.toFixed(2)}</b></div>
+                  {s.market_analysis?.fib?.near && <div style={{ color: "#fbbf24" }}>Cerca Fib {s.market_analysis?.fib?.near} a {s.market_analysis?.fib?.dist?.toFixed(2)} USD</div>}
+                </div>
+              )}
               <div>Vol: {s.market_analysis?.volatility?.toFixed(1)} USD | {s.flip_reason}</div>
             </div>
           </div>

@@ -300,8 +300,8 @@ def get_long_sr(rows, lookback_hours=4):
         return {
             "high_long": recent_high,
             "low_long": recent_low,
-            "resistance": resistance_near,  # nivel más relevante como TradingView
-            "support": support_near,
+            "resistance": resistance_near if resistance_near and resistance_near>1000 else recent_high,
+            "support": support_near if support_near and support_near>1000 else recent_low,
             "resistance_far": max(resistance, recent_high) if 'resistance' in locals() else recent_high,
             "support_far": min(support, recent_low) if 'support' in locals() else recent_low,
             "high_clusters": high_clusters[:3],
@@ -317,30 +317,6 @@ def get_long_sr(rows, lookback_hours=4):
         import traceback; traceback.print_exc()
         return None
 
-        # Swing high/low reales
-        recent_high = max(prices)
-        recent_low = min(prices)
-        # Buscar niveles con mas toques - pivotes
-        # Soporte = nivel donde precio rebotó varias veces abajo
-        # Resistencia = donde rebotó arriba
-        # Usamos percentiles 90 y 10 para evitar spikes
-        sorted_p = sorted(prices)
-        p90 = sorted_p[int(len(sorted_p)*0.90)]
-        p10 = sorted_p[int(len(sorted_p)*0.10)]
-        # Bandas
-        band = recent_high - recent_low
-        is_acc_long = band < 8.0  # Si en 4h se movió menos de 8 USD es acumulación larga como tu foto 4052-4064
-        return {
-            "high_long": recent_high,
-            "low_long": recent_low,
-            "high_90": p90,
-            "low_10": p10,
-            "band_long": band,
-            "is_acc_long": is_acc_long,
-            "lookback": lookback
-        }
-    except:
-        return None
 
 def calc_fibonacci_impulse(rows):
     """Fibonacci del último impulso - para perfeccionar entradas"""
@@ -436,10 +412,15 @@ def analyze_gold_pro():
         high_30 = max([c["high"] for c in candles_30[-2:]]) if len(candles_30)>=2 else high_15+1
         low_30 = min([c["low"] for c in candles_30[-2:]]) if len(candles_30)>=2 else low_15-1
         
-        # FIX v8.1: Soporte/resistencia principal = pivotes 4H como TradingView 4052 y 4065-4073, no 15m corto 4054-4059
-        support_pivot = support_long
-        resistance_pivot = resistance_long
-        support= support_pivot  # para señal principal
+        # FIX v8.2: Soporte/resistencia principal = pivotes 4H como TradingView 4052 y 4065-4073, nunca cero
+        support_pivot = support_long if support_long and support_long>1000 else low_15
+        resistance_pivot = resistance_long if resistance_long and resistance_long>1000 else high_15
+        # Si sale cero, usar precio actual +-5 USD
+        if not support_pivot or support_pivot==0:
+            support_pivot = current_price - 5.0
+        if not resistance_pivot or resistance_pivot==0:
+            resistance_pivot = current_price + 5.0
+        support= support_pivot
         resistance= resistance_pivot
         
         phase_info=detect_phase(candles_10,candles_15,rows)
@@ -599,14 +580,35 @@ def analyze_gold_pro():
         else:
             direction="BUY" if current_price>sma15 else "SELL"; confidence=56
 
-        # FIX v8.0 ACUMULACION LARGA - tu caso 4052-4064 por horas
+        # FIX v8.2 ACUMULACION - diferenciar estrecha vs amplia como tu foto 4052-4073 (21 USD)
         long_is_acc = long_sr["is_acc_long"] if long_sr else False
         long_band = long_sr["band_long"] if long_sr else phase_info["band"]
+        support_real = long_sr["support"] if long_sr and "support" in long_sr else support
+        resistance_real = long_sr["resistance"] if long_sr and "resistance" in long_sr else resistance
         
         if long_is_acc and long_band < 7.0:
-            # Acumulación real de varias horas como tu foto - NO dar señal aunque score 10-0
-            alert=f"⛔ ESPERA - ACUMULACION LARGA {long_band:.1f} USD EN {long_sr['lookback']//120}H - NO OPERAR"; alert_type="WAIT"; alert_desc=f"Precio lleva {long_sr['lookback']//120}h entre {long_sr['low_long']:.2f} y {long_sr['high_long']:.2f} (banda {long_band:.1f} USD) - acumulación larga como en tu foto 4052-4064 - esperar ruptura real 0 o Fib 0.618. Score {buy_score}B/{sell_score}S ignorado por acumulación"
-            confidence = 52  # bajar confianza en acumulación larga
+            # Acumulación estrecha <7 USD - NO operar, esperar ruptura (caso 4052-4058)
+            alert=f"⛔ ESPERA - ACUMULACIÓN ESTRECHA {long_band:.1f} USD EN {long_sr['lookback']//120}H - NO OPERAR"; alert_type="WAIT"; alert_desc=f"Precio lleva {long_sr['lookback']//120}h entre {long_sr['low_long']:.2f} y {long_sr['high_long']:.2f} (banda {long_band:.1f} USD) - acumulación estrecha - esperar ruptura real Fib 0. Score {buy_score}B/{sell_score}S ignorado"
+            confidence = 52
+        elif long_is_acc and long_band >= 10.0:
+            # Acumulación AMPLIA como tu foto actual 4052-4073 (21 USD) - SI dar señales de corte con impulso y retroceso dentro del área
+            # Si está cerca de soporte 4052 -> BUY, cerca de resistencia 4065-4073 -> SELL, scalping dentro del rango
+            dist_to_support = abs(current_price - support_real)
+            dist_to_resistance = abs(current_price - resistance_real)
+            if dist_to_support < 1.8 and current_price < support_real + 1.5:
+                # Cerca de soporte en acumulación amplia = oportunidad BUY con impulso
+                buy_score+=2
+                points_detail.append({"side":"BUY","points":2,"name":"CORTE SOPORTE EN ACUMULACIÓN AMPLIA","reason":f"📦 Acumulación amplia {long_band:.1f} USD ({support_real:.2f}-{resistance_real:.2f}) - Precio {current_price:.2f} cerca soporte {support_real:.2f} a {dist_to_support:.2f} USD - corte alcista con impulso + retroceso Fib"})
+                if confidence < 70:
+                    confidence = 70
+            if dist_to_resistance < 1.8 and current_price > resistance_real - 1.5:
+                sell_score+=2
+                points_detail.append({"side":"SELL","points":2,"name":"CORTE RESISTENCIA EN ACUMULACIÓN AMPLIA","reason":f"📦 Acumulación amplia {long_band:.1f} USD - Precio {current_price:.2f} cerca resistencia {resistance_real:.2f} a {dist_to_resistance:.2f} USD - corte bajista"})
+                if confidence < 70:
+                    confidence = 70
+            # No bloquear, permitir señales dentro del rango amplio
+            long_is_acc = False  # para que no bloquee abajo
+        
         elif "ACUMULACION" in phase_info["phase"] and not "EXPANSION" in phase_info["phase"]:
             alert="⛔ ESPERA - NO ENTRES - FASE ACUMULACION"; alert_type="WAIT"; alert_desc=f"Acumulacion rango {phase_info['band']:.1f} USD - NO operar, esperar PICO. Score {buy_score}B/{sell_score}S"
         elif "EXPANSION" in phase_info["phase"] and confidence>=70 and len([p for p in candle_pats if p["strength"]>=1])>0:
@@ -617,7 +619,7 @@ def analyze_gold_pro():
         elif confidence>=72 and abs(buy_score-sell_score)>=2 and not long_is_acc:
             alert=f"✅ ENTRA - {direction} CONFIRMADO - TENDENCIA FUERTE"; alert_type="ENTER"; alert_desc=f"Score {buy_score if direction=='BUY' else sell_score} vs {sell_score if direction=='BUY' else buy_score} - confianza {confidence}% - coincide con ruptura TradingView + {fib['desc'] if fib else ''}"
         elif confidence>=62 and abs(buy_score-sell_score)>=1 and not long_is_acc:
-            alert=f"⚠️ ENTRA CON PRECAUCION - {direction} - CONFIRMACION MEDIA"; alert_type="CAUTION"; alert_desc=f"Score {buy_score}B/{sell_score}S - espera vela fuerte para confirmar - {fib['desc'] if fib else phase_info['phase']}"
+            alert=f"⚠️ ENTRA CON PRECAUCION - {direction} - CONFIRMACIÓN MEDIA"; alert_type="CAUTION"; alert_desc=f"Score {buy_score}B/{sell_score}S - espera vela fuerte para confirmar - {fib['desc'] if fib else phase_info['phase']}"
         else:
             alert="⛔ ESPERA - SEÑAL DEBIL - RANGO"; alert_type="WAIT"; alert_desc=f"Score {buy_score}B/{sell_score}S - fase {phase_info['phase']} banda {phase_info['band']:.1f} - esperar breakout Fib 0"
 
@@ -632,7 +634,8 @@ def analyze_gold_pro():
             "candle_patterns":candle_pats,"points_detail":points_detail,
             "reason":" | ".join([p["name"] for p in points_detail[:3]]),
             "high_10":high_10,"low_10":low_10,"high_15":high_15,"low_15":low_15,"high_30":high_30,"low_30":low_30,
-            "high_long":long_sr["high_long"] if long_sr else high_15,"low_long":long_sr["low_long"] if long_sr else low_15,
+            "high_long":(long_sr["high_long"] if long_sr and long_sr.get("high_long",0)>1000 else high_15),
+            "low_long":(long_sr["low_long"] if long_sr and long_sr.get("low_long",0)>1000 else low_15),
             "band_long":long_sr["band_long"] if long_sr else 0,"fib":fib,
             "support_long":long_sr["support"] if long_sr else low_15,"resistance_long":long_sr["resistance"] if long_sr else high_15,
             "support_far":long_sr.get("support_far", low_15) if long_sr else low_15,"resistance_far":long_sr.get("resistance_far", high_15) if long_sr else high_15,

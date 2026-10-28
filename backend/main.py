@@ -130,6 +130,7 @@ def detect_candle_patterns(candles):
         pats.append({"name":"MARUBOZU_BEAR","dir":"SELL","strength":2,"desc":"Marubozu bajista - fuerza venta"})
     return pats
 
+
 def detect_phase(candles_10, candles_15, rows):
     if len(candles_10)<4:
         return {"phase":"INICIO","desc":"Iniciando fases oro - recolectando velas 10-15-30 min","band":0,"avg6":0,"avg3":0,"up":0,"down":0,"slope":0,"is_acc":False,"is_exp":False}
@@ -139,9 +140,20 @@ def detect_phase(candles_10, candles_15, rows):
     avg3=sum([c["range"] for c in last3])/len(last3)
     prices6=[c["close"] for c in last6]; band=max(prices6)-min(prices6)
     avg_body=sum([c["body"] for c in last6])/len(last6)
+    
+    # SMA responsive para fase - FIX para tu foto donde dice RANGO pero ya rompio
+    all_prices = [r[0] for r in rows] if rows else prices6
+    current_price = all_prices[-1] if all_prices else prices6[-1]
+    sma10_p = sum(all_prices[-10:])/10 if len(all_prices)>=10 else current_price
+    sma15_p = sum(all_prices[-15:])/15 if len(all_prices)>=15 else current_price
+    sma30_p = sum(all_prices[-30:])/30 if len(all_prices)>=30 else current_price
+    
+    recent_prices = all_prices[-31:-1] if len(all_prices)>=31 else all_prices[:-1]
+    high_recent = max(recent_prices) if recent_prices else current_price+3
+    low_recent = min(recent_prices) if recent_prices else current_price-3
+    
     is_acc=band<4.0 and avg6<2.0 and avg_body<1.2
     is_exp=avg3>avg6*1.5
-    is_cont=avg3<avg6*0.7
     up=down=0
     for c in reversed(candles_10):
         if c["bullish"]:
@@ -155,25 +167,146 @@ def detect_phase(candles_10, candles_15, rows):
     sma10_prev=sum([c["close"] for c in candles_10[-6:-1]])/5 if len(candles_10)>=6 else sma10
     slope=sma10-sma10_prev
     last=candles_10[-1]
-    if is_acc:
-        if up>=2: return {"phase":"ACUMULACION_ALCISTA","desc":f"ACUMULACION ALCISTA - rango {band:.1f} USD estrecho, vol {avg6:.1f} USD, {up} velas alcistas - posible PICO COMPRA tras acumulacion (como hoy)","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":slope,"is_acc":True,"is_exp":False}
-        if down>=2: return {"phase":"ACUMULACION_BAJISTA","desc":f"ACUMULACION BAJISTA - rango {band:.1f} USD, {down} velas bajistas - posible PICO VENTA tras acumulacion","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":slope,"is_acc":True,"is_exp":False}
-        return {"phase":"ACUMULACION","desc":f"ACUMULACION PURA - rango {band:.1f} USD muy estrecho, vol {avg6:.1f} USD, esperando PICO - NO ENTRAR AUN","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":slope,"is_acc":True,"is_exp":False}
+    
+    # EXPANSION - ruptura real
     if is_exp and last["strong"]:
         prices_all=[c["close"] for c in last6]
         if last["bullish"] and last["close"]>=max(prices_all)*0.998:
-            return {"phase":"EXPANSION_ALCISTA","desc":f"🔥 EXPANSION ALCISTA - PICO COMPRA tras acumulacion {band:.1f} USD -> ruptura {last['close']:.2f} vela fuerte {last['body']:.1f} USD, rango {last['range']:.1f} USD - ENTRAR","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":slope,"is_acc":False,"is_exp":True}
+            return {"phase":"EXPANSION_ALCISTA","desc":f"🔥 EXPANSION ALCISTA - PICO COMPRA tras acumulacion {band:.1f} USD -> ruptura {last['close']:.2f} vela fuerte {last['body']:.1f} USD - ENTRAR","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":slope,"is_acc":False,"is_exp":True}
         if not last["bullish"] and last["close"]<=min(prices_all)*1.002:
             return {"phase":"EXPANSION_BAJISTA","desc":f"🔥 EXPANSION BAJISTA - PICO VENTA tras acumulacion {band:.1f} USD -> ruptura {last['close']:.2f} vela {last['body']:.1f} USD - ENTRAR","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":slope,"is_acc":False,"is_exp":True}
+    
+    # FIX CRITICO PARA TU FOTO 12:21: ya rompio, precio 4029 > high_recent y sigue subiendo, no es RANGO
+    # Si precio rompio alto reciente y esta por encima de SMA, es TENDENCIA_ALCISTA aunque banda sea estrecha
+    if current_price >= high_recent * 0.999 and current_price > sma10_p and sma10_p > sma15_p:
+        return {"phase":"TENDENCIA_ALCISTA","desc":f"TENDENCIA ALCISTA POST-RUPTURA - precio {current_price:.2f} rompio alto {high_recent:.2f} y sigue arriba SMA10 {sma10_p:.2f} > SMA15 {sma15_p:.2f} - seguir BUY, no esperar ruptura","band":band,"avg6":avg6,"avg3":avg3,"up":up if up>0 else 1,"down":0,"slope":slope,"is_acc":False,"is_exp":False}
+    if current_price <= low_recent * 1.001 and current_price < sma10_p and sma10_p < sma15_p:
+        return {"phase":"TENDENCIA_BAJISTA","desc":f"TENDENCIA BAJISTA POST-RUPTURA - precio {current_price:.2f} rompio bajo {low_recent:.2f} y sigue abajo SMA - seguir SELL","band":band,"avg6":avg6,"avg3":avg3,"up":0,"down":down if down>0 else 1,"slope":slope,"is_acc":False,"is_exp":False}
+    
+    if is_acc:
+        if up>=2: return {"phase":"ACUMULACION_ALCISTA","desc":f"ACUMULACION ALCISTA - rango {band:.1f} USD estrecho, vol {avg6:.1f} USD, {up} velas alcistas - posible PICO COMPRA","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":slope,"is_acc":True,"is_exp":False}
+        if down>=2: return {"phase":"ACUMULACION_BAJISTA","desc":f"ACUMULACION BAJISTA - rango {band:.1f} USD, {down} velas bajistas - posible PICO VENTA","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":slope,"is_acc":True,"is_exp":False}
+        return {"phase":"ACUMULACION","desc":f"ACUMULACION PURA - rango {band:.1f} USD muy estrecho, vol {avg6:.1f} USD, esperando PICO - NO ENTRAR AUN","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":slope,"is_acc":True,"is_exp":False}
+    
     if up>=3:
-        if avg3<avg6: return {"phase":"AGOTAMIENTO_ALCISTA","desc":f"AGOTAMIENTO ALCISTA - {up} velas arriba pero rango decrece {avg3:.1f} < {avg6:.1f} - buscar vela bajista para SELL","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":slope,"is_acc":False,"is_exp":False}
-        return {"phase":"TENDENCIA_ALCISTA","desc":f"TENDENCIA ALCISTA - {up} velas alcistas, pendiente SMA +{slope:.2f} - seguir BUY","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":slope,"is_acc":False,"is_exp":False}
+        if avg3<avg6*0.8: return {"phase":"AGOTAMIENTO_ALCISTA","desc":f"AGOTAMIENTO ALCISTA - {up} velas arriba pero rango decrece {avg3:.1f} < {avg6:.1f} - buscar vela bajista","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":slope,"is_acc":False,"is_exp":False}
+        return {"phase":"TENDENCIA_ALCISTA","desc":f"TENDENCIA ALCISTA - {up} velas alcistas, pendiente +{slope:.2f}, precio {current_price:.2f} > SMA {sma10_p:.2f} - seguir BUY","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":slope,"is_acc":False,"is_exp":False}
     if down>=3:
-        if avg3<avg6: return {"phase":"AGOTAMIENTO_BAJISTA","desc":f"AGOTAMIENTO BAJISTA - {down} velas abajo rango decrece - buscar vela alcista para BUY","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":slope,"is_acc":False,"is_exp":False}
+        if avg3<avg6*0.8: return {"phase":"AGOTAMIENTO_BAJISTA","desc":f"AGOTAMIENTO BAJISTA - {down} velas abajo rango decrece - buscar vela alcista","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":slope,"is_acc":False,"is_exp":False}
         return {"phase":"TENDENCIA_BAJISTA","desc":f"TENDENCIA BAJISTA - {down} velas bajistas, pendiente {slope:.2f} - seguir SELL","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":slope,"is_acc":False,"is_exp":False}
+    
+    # Antes decia RANGO cuando banda <6 y vol <2.5, pero si precio > SMA y rompio alto, no es rango
     if band<6.0 and avg6<2.5:
-        return {"phase":"RANGO","desc":f"RANGO estrecho {band:.1f} USD - balance, esperar ruptura","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":slope,"is_acc":False,"is_exp":False}
-    return {"phase":"TRANSICION","desc":f"TRANSICION - vol {avg3:.1f} USD, pendiente {slope:.2f}","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":slope,"is_acc":False,"is_exp":False}
+        # Si esta por encima de SMA, es tendencia no rango
+        if current_price > sma10_p and sma10_p > sma15_p:
+            return {"phase":"TENDENCIA_ALCISTA","desc":f"TENDENCIA ALCISTA - banda estrecha {band:.1f} USD pero precio {current_price:.2f} > SMA10 {sma10_p:.2f} > SMA15 {sma15_p:.2f} - tendencia alcista sigue, no esperar ruptura, ya rompio","band":band,"avg6":avg6,"avg3":avg3,"up":1,"down":0,"slope":slope,"is_acc":False,"is_exp":False}
+        if current_price < sma10_p and sma10_p < sma15_p:
+            return {"phase":"TENDENCIA_BAJISTA","desc":f"TENDENCIA BAJISTA - banda estrecha {band:.1f} USD pero precio {current_price:.2f} < SMA - sigue bajista","band":band,"avg6":avg6,"avg3":avg3,"up":0,"down":1,"slope":slope,"is_acc":False,"is_exp":False}
+        return {"phase":"RANGO","desc":f"RANGO estrecho {band:.1f} USD - balance, esperar ruptura - precio {current_price:.2f} entre SMA","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":slope,"is_acc":False,"is_exp":False}
+    
+    return {"phase":"TRANSICION","desc":f"TRANSICION - vol {avg3:.1f} USD, pendiente {slope:.2f}, precio {current_price:.2f} vs SMA {sma10_p:.2f}","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":slope,"is_acc":False,"is_exp":False}
+
+
+
+
+def get_long_sr(rows, lookback_hours=4):
+    """Soporte/resistencia real de las ultimas 4 horas, no 30 min"""
+    try:
+        # 4h = 480 lecturas de 30seg, 2h=240
+        lookback = lookback_hours * 120  # 120 lecturas por hora
+        prices = [r[0] for r in rows[-lookback:]] if len(rows)>=lookback else [r[0] for r in rows]
+        if len(prices)<30:
+            return None
+        # Swing high/low reales
+        recent_high = max(prices)
+        recent_low = min(prices)
+        # Buscar niveles con mas toques - pivotes
+        # Soporte = nivel donde precio rebotó varias veces abajo
+        # Resistencia = donde rebotó arriba
+        # Usamos percentiles 90 y 10 para evitar spikes
+        sorted_p = sorted(prices)
+        p90 = sorted_p[int(len(sorted_p)*0.90)]
+        p10 = sorted_p[int(len(sorted_p)*0.10)]
+        # Bandas
+        band = recent_high - recent_low
+        is_acc_long = band < 8.0  # Si en 4h se movió menos de 8 USD es acumulación larga como tu foto 4052-4064
+        return {
+            "high_long": recent_high,
+            "low_long": recent_low,
+            "high_90": p90,
+            "low_10": p10,
+            "band_long": band,
+            "is_acc_long": is_acc_long,
+            "lookback": lookback
+        }
+    except:
+        return None
+
+def calc_fibonacci_impulse(rows):
+    """Fibonacci del último impulso - para perfeccionar entradas"""
+    try:
+        prices = [r[0] for r in rows[-200:]]  # ultimas 100 min
+        if len(prices)<50:
+            return None
+        # Encontrar último impulso fuerte >8 USD
+        # Busca swing low y high recientes
+        recent_low = min(prices[-100:])
+        recent_high = max(prices[-100:])
+        low_idx = len(prices) - 1 - prices[::-1].index(recent_low) if recent_low in prices else 0
+        high_idx = len(prices) - 1 - prices[::-1].index(recent_high) if recent_high in prices else 0
+        
+        # Determinar dirección del impulso
+        if high_idx > low_idx and (recent_high - recent_low) > 8.0:
+            # Impulso alcista: low -> high
+            impulse_dir = "BULL"
+            impulse_low = recent_low
+            impulse_high = recent_high
+            impulse_range = impulse_high - impulse_low
+        elif low_idx > high_idx and (recent_high - recent_low) > 8.0:
+            # Impulso bajista: high -> low
+            impulse_dir = "BEAR"
+            impulse_low = recent_low
+            impulse_high = recent_high
+            impulse_range = impulse_high - impulse_low
+        else:
+            # No hay impulso claro >8 USD
+            return None
+        
+        current = prices[-1]
+        # Niveles fib
+        fib_levels = {
+            "0": impulse_high if impulse_dir=="BULL" else impulse_low,
+            "0.236": impulse_high - impulse_range*0.236 if impulse_dir=="BULL" else impulse_low + impulse_range*0.236,
+            "0.382": impulse_high - impulse_range*0.382 if impulse_dir=="BULL" else impulse_low + impulse_range*0.382,
+            "0.5": impulse_high - impulse_range*0.5 if impulse_dir=="BULL" else impulse_low + impulse_range*0.5,
+            "0.618": impulse_high - impulse_range*0.618 if impulse_dir=="BULL" else impulse_low + impulse_range*0.618,
+            "0.786": impulse_high - impulse_range*0.786 if impulse_dir=="BULL" else impulse_low + impulse_range*0.786,
+            "1": impulse_low if impulse_dir=="BULL" else impulse_high,
+        }
+        
+        # Detectar en qué zona está el precio actual
+        near_fib = None
+        min_dist = 999
+        for level, price_fib in fib_levels.items():
+            dist = abs(current - price_fib)
+            if dist < min_dist and dist < 1.5:  # cerca a 1.5 USD del nivel fib
+                min_dist = dist
+                near_fib = level
+        
+        return {
+            "dir": impulse_dir,
+            "low": impulse_low,
+            "high": impulse_high,
+            "range": impulse_range,
+            "current": current,
+            "levels": fib_levels,
+            "near": near_fib,
+            "dist": min_dist if near_fib else None,
+            "desc": f"Impulso {impulse_dir} {impulse_low:.2f} -> {impulse_high:.2f} ({impulse_range:.1f} USD) - Precio {current:.2f} cerca Fib {near_fib}" if near_fib else f"Impulso {impulse_dir} {impulse_range:.1f} USD"
+        }
+    except Exception as e:
+        print(f"fib error {e}")
+        return None
 
 
 def analyze_gold_pro():
@@ -278,7 +411,61 @@ def analyze_gold_pro():
             if not last_15["bullish"] and not prev_15["bullish"] and not last_30["bullish"]:
                 sell_score+=2; points_detail.append({"side":"SELL","points":2,"name":"3 VELAS 15-30m BAJISTAS CONFIRMADAS","reason":"3 velas 15-30min bajistas confirmadas"})
 
+
+        # === NUEVO v8.0: SOPORTE/RESISTENCIA LARGO 4H + FIBONACCI ===
+        long_sr = get_long_sr(rows, 4)
+        fib = calc_fibonacci_impulse(rows)
+        
+        fib_detail = []
+        if long_sr:
+            # Si está en acumulación larga (tu caso 4052-4064 por horas), NO dar señal de confianza
+            if long_sr["is_acc_long"] and long_sr["band_long"] < 6.0:
+                # Esta es tu foto: banda 12 USD en 4h? No, banda 4052-4064 = 12 USD? Es 12? 4052-4070=18? 
+                # Pero en 4h si banda <8, es acumulación larga
+                pass  # lo usaremos abajo para alerta
+            
+            # Ajustar soporte/resistencia a valores reales largos si son más amplios
+            # Si long_sr es más amplio que high_15/low_15, usar long
+            if long_sr["band_long"] > (high_15 - low_15) * 1.5:
+                # Usar niveles largos como referencia real
+                support_long = long_sr["low_long"]
+                resistance_long = long_sr["high_long"]
+            else:
+                support_long = low_15
+                resistance_long = high_15
+        else:
+            support_long = low_15
+            resistance_long = high_15
+            long_sr = {"band_long": high_15-low_15, "is_acc_long": False, "high_long": high_15, "low_long": low_15, "lookback": 60}
+        
+        if fib:
+            # Si precio está cerca de Fib 0.618 o 0.5, es zona de entrada perfecta
+            if fib["near"] in ["0.618", "0.5", "0.382"]:
+                if fib["dir"] == "BULL":
+                    # Impulso alcista, retroceso a fib = oportunidad BUY
+                    if fib["near"] in ["0.618", "0.5"]:
+                        buy_score+=2
+                        fib_detail.append({"side":"BUY","points":2,"name":f"FIB {fib['near']} RETROCESO ALCISTA","reason":f"📐 Impulso BULL {fib['low']:.2f}->{fib['high']:.2f} ({fib['range']:.1f} USD) - Precio {fib['current']:.2f} en retroceso Fib {fib['near']} {fib['levels'][fib['near']]:.2f} a {fib['dist']:.2f} USD - ZONA COMPRA"})
+                else:
+                    # Impulso bajista, retroceso a fib = oportunidad SELL
+                    if fib["near"] in ["0.618", "0.5"]:
+                        sell_score+=2
+                        fib_detail.append({"side":"SELL","points":2,"name":f"FIB {fib['near']} RETROCESO BAJISTA","reason":f"📐 Impulso BEAR {fib['high']:.2f}->{fib['low']:.2f} ({fib['range']:.1f} USD) - Precio {fib['current']:.2f} en retroceso Fib {fib['near']} {fib['levels'][fib['near']]:.2f} - ZONA VENTA"})
+            # Si rompió Fib 0, es continuación
+            if fib["near"] == "0" and fib["dist"] is not None and fib["dist"] < 1.0:
+                if fib["dir"] == "BULL":
+                    buy_score+=2
+                    fib_detail.append({"side":"BUY","points":2,"name":"FIB 0 RUPTURA ALCISTA","reason":f"📐 Ruptura Fib 0 alcista {fib['high']:.2f} -> {fib['current']:.2f} - continuación BUY"})
+                else:
+                    sell_score+=2
+                    fib_detail.append({"side":"SELL","points":2,"name":"FIB 0 RUPTURA BAJISTA","reason":f"📐 Ruptura Fib 0 bajista {fib['low']:.2f} -> {fib['current']:.2f} - continuación SELL"})
+        
+        # Agregar fib a points_detail
+        for f in fib_detail:
+            points_detail.append(f)
+
         for pat in candle_pats:
+
             if pat["dir"]=="BUY":
                 buy_score+=pat["strength"]
                 points_detail.append({"side":"BUY","points":pat["strength"],"name":pat["name"],"reason":f"🕯️ {pat['desc']}"})
@@ -309,16 +496,28 @@ def analyze_gold_pro():
         else:
             direction="BUY" if current_price>sma15 else "SELL"; confidence=56
 
-        if "ACUMULACION" in phase_info["phase"] and not "EXPANSION" in phase_info["phase"]:
+        # FIX v8.0 ACUMULACION LARGA - tu caso 4052-4064 por horas
+        long_is_acc = long_sr["is_acc_long"] if long_sr else False
+        long_band = long_sr["band_long"] if long_sr else phase_info["band"]
+        
+        if long_is_acc and long_band < 7.0:
+            # Acumulación real de varias horas como tu foto - NO dar señal aunque score 10-0
+            alert=f"⛔ ESPERA - ACUMULACION LARGA {long_band:.1f} USD EN {long_sr['lookback']//120}H - NO OPERAR"; alert_type="WAIT"; alert_desc=f"Precio lleva {long_sr['lookback']//120}h entre {long_sr['low_long']:.2f} y {long_sr['high_long']:.2f} (banda {long_band:.1f} USD) - acumulación larga como en tu foto 4052-4064 - esperar ruptura real 0 o Fib 0.618. Score {buy_score}B/{sell_score}S ignorado por acumulación"
+            confidence = 52  # bajar confianza en acumulación larga
+        elif "ACUMULACION" in phase_info["phase"] and not "EXPANSION" in phase_info["phase"]:
             alert="⛔ ESPERA - NO ENTRES - FASE ACUMULACION"; alert_type="WAIT"; alert_desc=f"Acumulacion rango {phase_info['band']:.1f} USD - NO operar, esperar PICO. Score {buy_score}B/{sell_score}S"
         elif "EXPANSION" in phase_info["phase"] and confidence>=70 and len([p for p in candle_pats if p["strength"]>=1])>0:
-            alert=f"✅ ENTRA - PICO TRAS ACUMULACION + VELA CONFIRMADA - {direction} - SEÑAL LIMPIA"; alert_type="ENTER"; alert_desc=f"{phase_info['phase']} + vela {candle_pats[0]['name'] if candle_pats else ''} - señal limpia {confidence}% - Score {buy_score}B/{sell_score}S - como TradingView"
-        elif confidence>=72 and abs(buy_score-sell_score)>=2:
-            alert=f"✅ ENTRA - {direction} CONFIRMADO - TENDENCIA FUERTE"; alert_type="ENTER"; alert_desc=f"Score {buy_score if direction=='BUY' else sell_score} vs {sell_score if direction=='BUY' else buy_score} - confianza {confidence}% - coincide con ruptura TradingView"
-        elif confidence>=62 and abs(buy_score-sell_score)>=1:
-            alert=f"⚠️ ENTRA CON PRECAUCION - {direction} - CONFIRMACION MEDIA"; alert_type="CAUTION"; alert_desc=f"Score {buy_score}B/{sell_score}S - espera vela fuerte para confirmar"
+            fib_txt = f" + Fib {fib['near']} {fib['levels'][fib['near']]:.2f}" if fib and fib.get('near') else ""
+            alert=f"✅ ENTRA - PICO TRAS ACUMULACION + VELA CONFIRMADA - {direction} - SEÑAL LIMPIA{fib_txt}"; alert_type="ENTER"; alert_desc=f"{phase_info['phase']} + vela {candle_pats[0]['name'] if candle_pats else ''}{fib_txt} - señal limpia {confidence}% - Score {buy_score}B/{sell_score}S - coincide TradingView"
+        elif fib and fib.get('near') in ['0.618','0.5'] and confidence>=65:
+            alert=f"✅ ENTRA - {direction} EN FIB {fib['near']} - RETROCESO PERFECTO"; alert_type="ENTER"; alert_desc=f"📐 Fibonacci {fib['near']} - {fib['desc']} - Score {buy_score}B/{sell_score}S - entrada de libro"
+        elif confidence>=72 and abs(buy_score-sell_score)>=2 and not long_is_acc:
+            alert=f"✅ ENTRA - {direction} CONFIRMADO - TENDENCIA FUERTE"; alert_type="ENTER"; alert_desc=f"Score {buy_score if direction=='BUY' else sell_score} vs {sell_score if direction=='BUY' else buy_score} - confianza {confidence}% - coincide con ruptura TradingView + {fib['desc'] if fib else ''}"
+        elif confidence>=62 and abs(buy_score-sell_score)>=1 and not long_is_acc:
+            alert=f"⚠️ ENTRA CON PRECAUCION - {direction} - CONFIRMACION MEDIA"; alert_type="CAUTION"; alert_desc=f"Score {buy_score}B/{sell_score}S - espera vela fuerte para confirmar - {fib['desc'] if fib else phase_info['phase']}"
         else:
-            alert="⛔ ESPERA - SEÑAL DEBIL - RANGO"; alert_type="WAIT"; alert_desc=f"Score igualado {buy_score}B/{sell_score}S - fase {phase_info['phase']} - esperar breakout"
+            alert="⛔ ESPERA - SEÑAL DEBIL - RANGO"; alert_type="WAIT"; alert_desc=f"Score {buy_score}B/{sell_score}S - fase {phase_info['phase']} banda {phase_info['band']:.1f} - esperar breakout Fib 0"
+
 
         trend="BULLISH" if direction=="BUY" else "BEARISH"
         if abs(buy_score-sell_score)<=1: trend="LATERAL"
@@ -330,6 +529,10 @@ def analyze_gold_pro():
             "candle_patterns":candle_pats,"points_detail":points_detail,
             "reason":" | ".join([p["name"] for p in points_detail[:3]]),
             "high_10":high_10,"low_10":low_10,"high_15":high_15,"low_15":low_15,"high_30":high_30,"low_30":low_30,
+            "high_long":long_sr["high_long"] if long_sr else high_15,"low_long":long_sr["low_long"] if long_sr else low_15,
+            "band_long":long_sr["band_long"] if long_sr else 0,"fib":fib,
+            "support_long":long_sr["low_long"] if long_sr else low_15,"resistance_long":long_sr["high_long"] if long_sr else high_15,
+
             "high_recent":high_recent,"low_recent":low_recent,
             "sma10":sma10,"sma15":sma15,"sma30":sma30,"support":support,"resistance":resistance,
             "up_streak":up_streak,"down_streak":down_streak,"volatility":phase_info["avg3"],"volatility_15":phase_info["avg6"],

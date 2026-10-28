@@ -209,14 +209,114 @@ def detect_phase(candles_10, candles_15, rows):
 
 
 
+
 def get_long_sr(rows, lookback_hours=4):
-    """Soporte/resistencia real de las ultimas 4 horas, no 30 min"""
+    """Soporte/resistencia REAL con pivotes como TradingView - no solo max/min"""
     try:
-        # 4h = 480 lecturas de 30seg, 2h=240
-        lookback = lookback_hours * 120  # 120 lecturas por hora
+        lookback = lookback_hours * 120
         prices = [r[0] for r in rows[-lookback:]] if len(rows)>=lookback else [r[0] for r in rows]
-        if len(prices)<30:
+        if len(prices)<60:
             return None
+        
+        # Detectar pivotes como TradingView: máximos/mínimos locales
+        # Un pivote alto = precio mayor que 3 a cada lado
+        pivot_highs = []
+        pivot_lows = []
+        for i in range(5, len(prices)-5):
+            is_high = True
+            is_low = True
+            for j in range(1,4):
+                if prices[i] <= prices[i-j] or prices[i] <= prices[i+j]:
+                    is_high = False
+                if prices[i] >= prices[i-j] or prices[i] >= prices[i+j]:
+                    is_low = False
+            if is_high and prices[i] > 4000:
+                pivot_highs.append(prices[i])
+            if is_low and prices[i] > 4000:
+                pivot_lows.append(prices[i])
+        
+        if not pivot_highs:
+            pivot_highs = [max(prices)]
+        if not pivot_lows:
+            pivot_lows = [min(prices)]
+        
+        # Clusterizar niveles que están a menos de 1.2 USD (mismo soporte/resistencia)
+        def cluster_levels(levels, tolerance=1.2):
+            if not levels:
+                return []
+            levels_sorted = sorted(levels)
+            clusters = [[levels_sorted[0]]]
+            for l in levels_sorted[1:]:
+                if abs(l - sum(clusters[-1])/len(clusters[-1])) < tolerance:
+                    clusters[-1].append(l)
+                else:
+                    clusters.append([l])
+            # Promedio de cada cluster + conteo de toques
+            result = []
+            for c in clusters:
+                avg = sum(c)/len(c)
+                result.append((avg, len(c)))
+            # Ordenar por toques (más toques = nivel más fuerte como en TradingView)
+            result.sort(key=lambda x: x[1], reverse=True)
+            return result
+        
+        high_clusters = cluster_levels(pivot_highs, 1.5)
+        low_clusters = cluster_levels(pivot_lows, 1.5)
+        
+        # Soporte más fuerte = low con más toques, Resistencia más fuerte = high con más toques
+        # Pero también considerar extremos recientes como en tu foto
+        recent_high = max(prices)
+        recent_low = min(prices)
+        band_long = recent_high - recent_low
+        
+        # Resistencia: cluster alto con más toques o max reciente si no hay cluster claro
+        # Tu foto: resistencia 4065 y 4073 son 2 clusters
+        if high_clusters:
+            # Tomar los 2 niveles más tocados como R1 y R2
+            res1 = high_clusters[0][0]  # más tocado
+            res2 = high_clusters[1][0] if len(high_clusters)>1 else recent_high
+            resistance = max(res1, res2) if abs(res1-res2)>2 else res1
+            # Si hay 2 resistencias separadas como 4065 y 4073, usar la más cercana al precio actual
+            current = prices[-1]
+            # En tu foto: 4065 es R1, 4073 es R2
+            resistance_near = min(high_clusters, key=lambda x: abs(x[0]-current))[0] if high_clusters else recent_high
+        else:
+            resistance = recent_high
+            resistance_near = recent_high
+        
+        if low_clusters:
+            sup1 = low_clusters[0][0]
+            sup2 = low_clusters[1][0] if len(low_clusters)>1 else recent_low
+            support = min(sup1, sup2) if abs(sup1-sup2)>2 else sup1
+            support_near = min(low_clusters, key=lambda x: abs(x[0]-prices[-1]))[0] if low_clusters else recent_low
+        else:
+            support = recent_low
+            support_near = recent_low
+        
+        # Para tu caso 4052-4073, debe dar soporte 4052-4054 y resistencia 4065-4073
+        # Usar los extremos del cluster para banda real
+        is_acc_long = band_long < 12.0  # Si en 4h banda <12 USD como 4052-4064 (12 USD) es acumulación
+        
+        return {
+            "high_long": recent_high,
+            "low_long": recent_low,
+            "resistance": resistance_near,  # nivel más relevante como TradingView
+            "support": support_near,
+            "resistance_far": max(resistance, recent_high) if 'resistance' in locals() else recent_high,
+            "support_far": min(support, recent_low) if 'support' in locals() else recent_low,
+            "high_clusters": high_clusters[:3],
+            "low_clusters": low_clusters[:3],
+            "band_long": band_long,
+            "is_acc_long": is_acc_long,
+            "lookback": lookback,
+            "pivot_highs": pivot_highs[-10:],
+            "pivot_lows": pivot_lows[-10:]
+        }
+    except Exception as e:
+        print(f"long_sr error {e}")
+        import traceback; traceback.print_exc()
+        return None
+
         # Swing high/low reales
         recent_high = max(prices)
         recent_low = min(prices)
@@ -336,7 +436,11 @@ def analyze_gold_pro():
         high_30 = max([c["high"] for c in candles_30[-2:]]) if len(candles_30)>=2 else high_15+1
         low_30 = min([c["low"] for c in candles_30[-2:]]) if len(candles_30)>=2 else low_15-1
         
-        support=low_15; resistance=high_15
+        # FIX v8.1: Soporte/resistencia principal = pivotes 4H como TradingView 4052 y 4065-4073, no 15m corto 4054-4059
+        support_pivot = support_long
+        resistance_pivot = resistance_long
+        support= support_pivot  # para señal principal
+        resistance= resistance_pivot
         
         phase_info=detect_phase(candles_10,candles_15,rows)
         candle_pats=detect_candle_patterns(candles_10)+detect_candle_patterns(candles_15)
@@ -426,13 +530,12 @@ def analyze_gold_pro():
             
             # Ajustar soporte/resistencia a valores reales largos si son más amplios
             # Si long_sr es más amplio que high_15/low_15, usar long
-            if long_sr["band_long"] > (high_15 - low_15) * 1.5:
-                # Usar niveles largos como referencia real
-                support_long = long_sr["low_long"]
-                resistance_long = long_sr["high_long"]
-            else:
-                support_long = low_15
-                resistance_long = high_15
+            # FIX v8.1: Usar pivotes reales como TradingView - soporte 4052 y resistencia 4065-4073
+            support_long = long_sr["support"] if long_sr and "support" in long_sr else low_15
+            resistance_long = long_sr["resistance"] if long_sr and "resistance" in long_sr else high_15
+            # Para puntos, usar niveles lejanos también
+            support_far = long_sr["support_far"] if long_sr and "support_far" in long_sr else support_long
+            resistance_far = long_sr["resistance_far"] if long_sr and "resistance_far" in long_sr else resistance_long
         else:
             support_long = low_15
             resistance_long = high_15
@@ -531,7 +634,10 @@ def analyze_gold_pro():
             "high_10":high_10,"low_10":low_10,"high_15":high_15,"low_15":low_15,"high_30":high_30,"low_30":low_30,
             "high_long":long_sr["high_long"] if long_sr else high_15,"low_long":long_sr["low_long"] if long_sr else low_15,
             "band_long":long_sr["band_long"] if long_sr else 0,"fib":fib,
-            "support_long":long_sr["low_long"] if long_sr else low_15,"resistance_long":long_sr["high_long"] if long_sr else high_15,
+            "support_long":long_sr["support"] if long_sr else low_15,"resistance_long":long_sr["resistance"] if long_sr else high_15,
+            "support_far":long_sr.get("support_far", low_15) if long_sr else low_15,"resistance_far":long_sr.get("resistance_far", high_15) if long_sr else high_15,
+            "high_clusters":long_sr.get("high_clusters", []) if long_sr else [],"low_clusters":long_sr.get("low_clusters", []) if long_sr else [],
+
 
             "high_recent":high_recent,"low_recent":low_recent,
             "sma10":sma10,"sma15":sma15,"sma30":sma30,"support":support,"resistance":resistance,

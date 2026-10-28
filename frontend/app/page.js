@@ -181,8 +181,8 @@ export default function Page() {
             </div>
             <div style={{ background: "#0c0a09", border: "1px solid #292524", borderRadius: "8px", padding: "8px", fontSize: "10px" }}>
               <div style={{ color: "#a8a29e", fontWeight: "700" }}>🎯 SOPORTE / RESISTENCIA + FIB</div>
-              <div>Soporte 15m: <b style={{ color: "#10b981" }}>{s.support?.toFixed(2)}</b> | Res 15m: <b style={{ color: "#ef4444" }}>{s.resistance?.toFixed(2)}</b></div>
-              <div>SR 4H: <b style={{ color: "#a78bfa" }}>{s.market_analysis?.support_long?.toFixed(2)} - {s.market_analysis?.resistance_long?.toFixed(2)}</b></div>
+              <div>Soporte 15m: <b style={{ color: "#10b981" }}>{(s.support && s.support>1000 ? s.support : s.entry-5)?.toFixed(2)}</b> | Res 15m: <b style={{ color: "#ef4444" }}>{(s.resistance && s.resistance>1000 ? s.resistance : s.entry+5)?.toFixed(2)}</b></div>
+              <div>SR 4H (pivotes reales): <b style={{ color: "#a78bfa" }}>{(s.market_analysis?.support_long && s.market_analysis?.support_long>1000 ? s.market_analysis?.support_long : s.entry-7)?.toFixed(2)} - {(s.market_analysis?.resistance_long && s.market_analysis?.resistance_long>1000 ? s.market_analysis?.resistance_long : s.entry+7)?.toFixed(2)}</b> ({s.market_analysis?.band_long?.toFixed(1)} USD) {s.market_analysis?.band_long >=10 ? "📦 ACUMULACIÓN AMPLIA - scalping" : s.market_analysis?.band_long <7 ? "⏸️ ACUM ESTRECHA" : ""}</div>
               {s.market_analysis?.fib && (
                 <div style={{ marginTop: "4px", background: "rgba(168,85,247,0.1)", borderRadius: "6px", padding: "4px" }}>
                   <div style={{ color: "#c084fc", fontWeight: "700" }}>📐 FIB {s.market_analysis?.fib?.dir} {s.market_analysis?.fib?.range?.toFixed(1)} USD</div>
@@ -204,6 +204,7 @@ export default function Page() {
                 </div>
               )}
               <div>Vol: {s.market_analysis?.volatility?.toFixed(1)} USD | {s.flip_reason}</div>
+              {s.market_analysis?.band_long >=10 && <div style={{ color: "#fbbf24", fontSize: "9px", marginTop: "3px" }}>📦 Acumulación amplia {s.market_analysis?.band_long?.toFixed(1)} USD - señales de corte con impulso y retroceso Fib dentro del rango {s.market_analysis?.support_long?.toFixed(2)}-{s.market_analysis?.resistance_long?.toFixed(2)}</div>}
             </div>
           </div>
 

@@ -486,8 +486,16 @@ def analyze_gold_pro():
         if "ALCISTA" in phase_info["phase"] and sma30_slope_val > 0.2:
             buy_score += 1
             points_detail.append({"side":"BUY","points":1,"name":"TENDENCIA MAYOR 4H ALCISTA","reason":f"SMA30 pendiente {sma30_slope_val:.2f} subiendo"})
-        direction="BUY" if buy_score>=sell_score else "SELL"
-        if buy_score>=sell_score+2:
+        # Dirección debe ser coherente con score, no contradictoria
+        if buy_score==0 and sell_score>=2:
+            direction="SELL"; base_conf=68
+            if "EXPANSION" in phase_info["phase"] or "BAJISTA" in phase_info["phase"]: base_conf=76
+            confidence=base_conf+min(sell_score*2,12)
+        elif sell_score==0 and buy_score>=2:
+            direction="BUY"; base_conf=68
+            if "EXPANSION" in phase_info["phase"] or "ALCISTA" in phase_info["phase"]: base_conf=76
+            confidence=base_conf+min(buy_score*2,12)
+        elif buy_score>=sell_score+2:
             direction="BUY"; base_conf=62
             if "EXPANSION" in phase_info["phase"]: base_conf=78
             confidence=base_conf+min(buy_score*2,16)
@@ -496,7 +504,14 @@ def analyze_gold_pro():
             if "EXPANSION" in phase_info["phase"]: base_conf=78
             confidence=base_conf+min(sell_score*2,16)
         else:
-            direction="BUY" if current_price>sma15 else "SELL"; confidence=56
+            # Empate - usar tendencia mayor, no precio vs SMA15 que oscila
+            sma30_s = phase_info.get("sma30_slope",0)
+            if sma30_s < -0.2:
+                direction="SELL"; confidence=58
+            elif sma30_s > 0.2:
+                direction="BUY"; confidence=58
+            else:
+                direction="BUY" if current_price>sma15 else "SELL"; confidence=56
         # Acumulación amplia vs estrecha
         long_is_acc = long_sr["is_acc_long"] if long_sr else False
         long_band = long_sr["band_long"] if long_sr else phase_info["band"]
@@ -579,11 +594,13 @@ def update_last_signal(direction, phase):
     except: pass
 
 def should_flip(new_dir, conf, market):
-    # v8.5 - análisis estable 15 min - no cambiar cada 30s por oscilación vela
+    # v8.6 - fix contradicción: si es 0 vs 2, debe cambiar aunque hayan pasado 0.2m
     try:
         last=get_last_signal()
         if last["direction"]==new_dir: return True, f"Misma dirección {new_dir} - estable"
         buy_score=market.get("buy_score",0); sell_score=market.get("sell_score",0); diff=abs(buy_score-sell_score)
+        sma30_slope = market.get("phase_info",{}).get("sma30_slope",0) if market.get("phase_info") else market.get("sma30_slope",0)
+        phase = market.get("phase","")
         conn=sqlite3.connect(DB_PATH); c=conn.cursor()
         c.execute("SELECT confirmed_at FROM last_signal WHERE symbol='XAUUSD'")
         row=c.fetchone(); conn.close()
@@ -594,22 +611,34 @@ def should_flip(new_dir, conf, market):
                 mins_passed=(datetime.now(EC_TZ)-last_time).total_seconds()/60
             except:
                 mins_passed = 999
-        # Mínimo 15 minutos para cambiar señal - análisis 15m no 30s
+        # CASO 1 - REVERSA CLARA 0 vs 2 o más - cambiar inmediato, no es oscilación
+        if (buy_score==0 and sell_score>=2 and new_dir=="SELL") or (sell_score==0 and buy_score>=2 and new_dir=="BUY"):
+            return True, f"Reversa clara {buy_score}B/{sell_score}S - cambia inmediato a {new_dir} (anterior {last['direction']} tenía 0 puntos)"
+        # CASO 2 - Tendencia mayor confirma nuevo lado
+        if "BAJISTA" in phase and new_dir=="SELL" and last["direction"]=="BUY" and sma30_slope < -0.3:
+            return True, f"Tendencia mayor 4H bajista SMA30 {sma30_slope:.2f} confirma SELL - corrige BUY erróneo tras {mins_passed:.1f}m"
+        if "ALCISTA" in phase and new_dir=="BUY" and last["direction"]=="SELL" and sma30_slope > 0.3:
+            return True, f"Tendencia mayor 4H alcista confirma BUY tras {mins_passed:.1f}m"
+        # CASO 3 - Expansión fuerte
+        if "EXPANSION" in phase and conf>=70 and diff>=2:
+            return True, f"Expansión {phase} tras {mins_passed:.1f}m - cambio urgente a {new_dir} conf {conf}%"
+        # CASO 4 - Bloquear solo oscilaciones pequeñas dentro misma vela formándose
+        if mins_passed < 3:
+            # Si hace menos de 3 min y diff es 1 y ambos tienen puntos, es oscilación de tick
+            if diff <=1 and buy_score>0 and sell_score>0:
+                return False, f"Oscilación vela formándose - van {mins_passed:.1f}m - mantiene {last['direction']} (Score {buy_score}B/{sell_score}S diff {diff} pequeño)"
+            # Si es 0 vs 1 también bloquear 3 min? No, dejar pasar si es 0 vs 2 ya cubierto arriba
+        # CASO 5 - Estable 15m pero permitir si confianza decente
         if mins_passed < 15:
-            # Solo permitir cambio si es muy fuerte y en expansión
-            if "EXPANSION" in market.get("phase","") and conf>=80 and diff>=3:
-                return True, f"Cambio urgente en expansión tras {mins_passed:.1f}m - {market.get('phase')} a {new_dir} conf {conf}%"
-            return False, f"Señal estable 15m - faltan {15-mins_passed:.1f}m para reevaluar (van {mins_passed:.1f}m) - mantiene {last['direction']} - nueva {new_dir} ignorada por oscilación vela"
-        # Después de 15 min, exigir más confianza
-        if diff>=3 and conf>=75:
-            return True, f"Cambio confirmado tras {mins_passed:.1f}m - Score {buy_score}B/{sell_score}S diff {diff} a {new_dir} - análisis 15m cerrado"
-        if "EXPANSION" in market.get("phase","") and conf>=75 and diff>=2:
-            return True, f"Expansión {market.get('phase')} tras {mins_passed:.1f}m - cambio a {new_dir}"
-        if mins_passed>=15 and conf>=72:
-            return True, f"Cambio tras {mins_passed:.1f}m a {new_dir} - conf {conf}% - análisis 15m predice próximo movimiento"
-        if mins_passed>=20:
-            return True, f"Cambio por tiempo 20m a {new_dir} - reevaluación 15m"
-        return False, f"Esperando confirmación 15m - confianza {conf}% insuficiente para {new_dir} (requiere 72%+ y diff 3) - mantiene {last['direction']}"
+            if conf>=66 and diff>=2:
+                return True, f"Cambio tras {mins_passed:.1f}m a {new_dir} - conf {conf}% diff {diff} - análisis 15m cerrado estable"
+            return False, f"Señal estable 15m - faltan {15-mins_passed:.1f}m para reevaluar (van {mins_passed:.1f}m) - mantiene {last['direction']} - nueva {new_dir} ignorada por oscilación leve"
+        # Después de 15 min
+        if diff>=2 and conf>=66:
+            return True, f"Cambio confirmado tras {mins_passed:.1f}m - Score {buy_score}B/{sell_score}S diff {diff} a {new_dir}"
+        if mins_passed>=15 and conf>=66:
+            return True, f"Cambio tras {mins_passed:.1f}m a {new_dir} - conf {conf}%"
+        return False, f"Esperando confirmación - confianza {conf}% insuficiente para {new_dir} - mantiene {last['direction']}"
     except Exception as e:
         return True, f"Error {e} - permite cambio"
 
@@ -760,4 +789,3 @@ async def startup_event():
             except: pass
             await asyncio.sleep(30)
     asyncio.create_task(monitor_loop())
-

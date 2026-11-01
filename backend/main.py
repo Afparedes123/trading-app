@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 
-app = FastAPI(title="EdgeAlert ORO - FASES + PUNTOS + FIB")
+app = FastAPI(title="EdgeAlert ORO - FASES + PUNTOS + FIB + ANTIGRAVITY")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 EC_TZ = timezone(timedelta(hours=-5))
@@ -85,7 +85,6 @@ def build_candles(rows, points):
     if len(rows)<points: return []
     for i in range(0,len(rows),points):
         chunk=rows[i:i+points]
-        # Última vela puede estar incompleta - marcarla
         is_forming = len(chunk) < points
         if len(chunk)<points*0.6: continue
         prices=[r[0] for r in chunk]
@@ -98,11 +97,8 @@ def build_candles(rows, points):
     return candles
 
 def get_closed_candles(candles):
-    # Para análisis estable 15m - usar solo velas cerradas, no la que se está formando
-    if not candles:
-        return [], None
+    if not candles: return [], None
     if candles[-1].get("forming"):
-        # Última se está formando, usar penúltima como última cerrada
         closed = candles[:-1]
         forming = candles[-1]
     else:
@@ -127,44 +123,72 @@ def detect_candle_patterns(candles):
         pats.append({"name":"MARUBOZU BAJISTA","dir":"SELL","strength":2,"desc":"Marubozu bajista - fuerza venta"})
     return pats
 
+# --- NUEVAS FUNCIONES ANTIGRAVITY Y SMART MONEY ---
+def calc_antigravity_bands(prices, period=20, dev=2.5):
+    """Calcula Bandas de Desviación para detectar agotamiento del precio (Antigravity)"""
+    if len(prices) < period: return None
+    recent = prices[-period:]
+    mean = sum(recent) / period
+    variance = sum((p - mean) ** 2 for p in recent) / period
+    std_dev = math.sqrt(variance)
+    return {
+        "upper": mean + (dev * std_dev),
+        "lower": mean - (dev * std_dev),
+        "mean": mean,
+        "std": std_dev
+    }
+
+def detect_smart_money(candles):
+    """Detecta FVG (Fair Value Gaps) y Order Blocks Institucionales"""
+    if len(candles) < 3: return []
+    smc_signals = []
+    
+    # Evaluar FVG (Vacíos de Liquidez) en las últimas 3 velas cerradas (o casi cerradas)
+    c1, c2, c3 = candles[-3], candles[-2], candles[-1]
+    
+    # FVG Alcista (Imbalance de compra)
+    if c1["high"] < c3["low"] and c2["bullish"] and c2["strong"]:
+        smc_signals.append({"name": "FVG ALCISTA", "dir": "BUY", "strength": 3, "desc": f"Vacío liquidez (SMC) entre {c1['high']:.2f} y {c3['low']:.2f}"})
+        
+    # FVG Bajista (Imbalance de venta)
+    if c1["low"] > c3["high"] and not c2["bullish"] and c2["strong"]:
+        smc_signals.append({"name": "FVG BAJISTA", "dir": "SELL", "strength": 3, "desc": f"Vacío liquidez (SMC) entre {c3['high']:.2f} y {c1['low']:.2f}"})
+
+    # Order Block (Última vela contraria antes del movimiento fuerte)
+    if c2["strong"] and c2["bullish"] and not c1["bullish"]:
+        smc_signals.append({"name": "ORDER BLOCK ALCISTA", "dir": "BUY", "strength": 2, "desc": f"Bloque de órdenes en {c1['low']:.2f}"})
+    if c2["strong"] and not c2["bullish"] and c1["bullish"]:
+        smc_signals.append({"name": "ORDER BLOCK BAJISTA", "dir": "SELL", "strength": 2, "desc": f"Bloque de órdenes en {c1['high']:.2f}"})
+
+    return smc_signals
+# ----------------------------------------------------
+
 def get_long_sr(rows, lookback_hours=4):
     try:
         lookback = lookback_hours * 120
         prices = [r[0] for r in rows[-lookback:]] if len(rows)>=lookback else [r[0] for r in rows]
-        if len(prices)<60:
-            return None
+        if len(prices)<60: return None
         pivot_highs = []
         pivot_lows = []
         for i in range(5, len(prices)-5):
             is_high = True
             is_low = True
             for j in range(1,4):
-                if prices[i] <= prices[i-j] or prices[i] <= prices[i+j]:
-                    is_high = False
-                if prices[i] >= prices[i-j] or prices[i] >= prices[i+j]:
-                    is_low = False
-            if is_high:
-                pivot_highs.append(prices[i])
-            if is_low:
-                pivot_lows.append(prices[i])
-        if not pivot_highs:
-            pivot_highs = [max(prices)]
-        if not pivot_lows:
-            pivot_lows = [min(prices)]
+                if prices[i] <= prices[i-j] or prices[i] <= prices[i+j]: is_high = False
+                if prices[i] >= prices[i-j] or prices[i] >= prices[i+j]: is_low = False
+            if is_high: pivot_highs.append(prices[i])
+            if is_low: pivot_lows.append(prices[i])
+        if not pivot_highs: pivot_highs = [max(prices)]
+        if not pivot_lows: pivot_lows = [min(prices)]
         def cluster_levels(levels, tolerance=1.5):
-            if not levels:
-                return []
+            if not levels: return []
             levels_sorted = sorted(levels)
             clusters = [[levels_sorted[0]]]
             for l in levels_sorted[1:]:
-                if abs(l - sum(clusters[-1])/len(clusters[-1])) < tolerance:
-                    clusters[-1].append(l)
-                else:
-                    clusters.append([l])
+                if abs(l - sum(clusters[-1])/len(clusters[-1])) < tolerance: clusters[-1].append(l)
+                else: clusters.append([l])
             result = []
-            for c in clusters:
-                avg = sum(c)/len(c)
-                result.append((avg, len(c)))
+            for c in clusters: result.append((sum(c)/len(c), len(c)))
             result.sort(key=lambda x: x[1], reverse=True)
             return result
         high_clusters = cluster_levels(pivot_highs, 1.5)
@@ -173,53 +197,28 @@ def get_long_sr(rows, lookback_hours=4):
         recent_low = min(prices)
         band_long = recent_high - recent_low
         current = prices[-1]
-        if high_clusters:
-            resistance = min(high_clusters, key=lambda x: abs(x[0]-current))[0]
-        else:
-            resistance = recent_high
-        if low_clusters:
-            support = min(low_clusters, key=lambda x: abs(x[0]-current))[0]
-        else:
-            support = recent_low
-        is_acc_long = band_long < 12.0
+        resistance = min(high_clusters, key=lambda x: abs(x[0]-current))[0] if high_clusters else recent_high
+        support = min(low_clusters, key=lambda x: abs(x[0]-current))[0] if low_clusters else recent_low
         return {
-            "high_long": recent_high,
-            "low_long": recent_low,
-            "resistance": resistance,
-            "support": support,
-            "resistance_far": recent_high,
-            "support_far": recent_low,
-            "high_clusters": high_clusters[:3],
-            "low_clusters": low_clusters[:3],
-            "band_long": band_long,
-            "is_acc_long": is_acc_long,
-            "lookback": lookback
+            "high_long": recent_high, "low_long": recent_low, "resistance": resistance, "support": support,
+            "resistance_far": recent_high, "support_far": recent_low, "high_clusters": high_clusters[:3],
+            "low_clusters": low_clusters[:3], "band_long": band_long, "is_acc_long": band_long < 12.0, "lookback": lookback
         }
-    except Exception as e:
-        print(f"long_sr error {e}")
-        return None
+    except Exception as e: return None
 
 def calc_fibonacci_impulse(rows):
     try:
         prices = [r[0] for r in rows[-200:]]
-        if len(prices)<50:
-            return None
+        if len(prices)<50: return None
         recent_low = min(prices[-100:])
         recent_high = max(prices[-100:])
         low_idx = len(prices) - 1 - prices[::-1].index(recent_low) if recent_low in prices else 0
         high_idx = len(prices) - 1 - prices[::-1].index(recent_high) if recent_high in prices else 0
         if high_idx > low_idx and (recent_high - recent_low) > 8.0:
-            impulse_dir = "ALCISTA"
-            impulse_low = recent_low
-            impulse_high = recent_high
-            impulse_range = impulse_high - impulse_low
+            impulse_dir, impulse_low, impulse_high, impulse_range = "ALCISTA", recent_low, recent_high, recent_high - recent_low
         elif low_idx > high_idx and (recent_high - recent_low) > 8.0:
-            impulse_dir = "BAJISTA"
-            impulse_low = recent_low
-            impulse_high = recent_high
-            impulse_range = impulse_high - impulse_low
-        else:
-            return None
+            impulse_dir, impulse_low, impulse_high, impulse_range = "BAJISTA", recent_low, recent_high, recent_high - recent_low
+        else: return None
         current = prices[-1]
         fib_levels = {
             "0": impulse_high if impulse_dir=="ALCISTA" else impulse_low,
@@ -230,29 +229,18 @@ def calc_fibonacci_impulse(rows):
             "0.786": impulse_high - impulse_range*0.786 if impulse_dir=="ALCISTA" else impulse_low + impulse_range*0.786,
             "1": impulse_low if impulse_dir=="ALCISTA" else impulse_high,
         }
-        near_fib = None
-        min_dist = 999
+        near_fib = None; min_dist = 999
         for level, price_fib in fib_levels.items():
             dist = abs(current - price_fib)
-            if dist < min_dist and dist < 1.8:
-                min_dist = dist
-                near_fib = level
+            if dist < min_dist and dist < 1.8: min_dist, near_fib = dist, level
         return {
-            "dir": impulse_dir,
-            "low": impulse_low,
-            "high": impulse_high,
-            "range": impulse_range,
-            "current": current,
-            "levels": fib_levels,
-            "near": near_fib,
-            "dist": min_dist if near_fib else None,
+            "dir": impulse_dir, "low": impulse_low, "high": impulse_high, "range": impulse_range,
+            "current": current, "levels": fib_levels, "near": near_fib, "dist": min_dist if near_fib else None,
             "desc": f"Impulso {impulse_dir} {impulse_low:.2f} -> {impulse_high:.2f} ({impulse_range:.1f} USD)"
         }
-    except:
-        return None
+    except: return None
 
 def detect_phase(candles_10, candles_15, rows):
-    # v8.4 FIX - tendencia 4H manda sobre picos de 10m
     if len(candles_10)<4:
         return {"phase":"INICIO","desc":"Iniciando análisis oro","band":0,"avg6":0,"avg3":0,"up":0,"down":0,"slope":0,"is_acc":False,"is_exp":False,"high_4h":0,"low_4h":0,"sma30_slope":0}
     last6=candles_10[-6:] if len(candles_10)>=6 else candles_10
@@ -263,24 +251,18 @@ def detect_phase(candles_10, candles_15, rows):
     avg_body=sum([c["body"] for c in last6])/len(last6) if last6 else 1
     all_prices = [r[0] for r in rows] if rows else prices6
     current_price = all_prices[-1] if all_prices else prices6[-1]
-    # Tendencia mayor 4H - 480 puntos = 4 horas
     prices_4h = all_prices[-480:] if len(all_prices)>=480 else all_prices
     high_4h = max(prices_4h) if prices_4h else current_price+10
     low_4h = min(prices_4h) if prices_4h else current_price-10
-    band_4h = high_4h - low_4h
     sma10_p = sum(all_prices[-10:])/10 if len(all_prices)>=10 else current_price
-    sma15_p = sum(all_prices[-15:])/15 if len(all_prices)>=15 else current_price
     sma30_p = sum(all_prices[-30:])/30 if len(all_prices)>=30 else current_price
     sma60_p = sum(all_prices[-60:])/60 if len(all_prices)>=60 else sma30_p
-    # Pendiente SMA30 real - si cae es bajista aunque haya vela verde
     sma30_prev = sum(all_prices[-40:-10])/30 if len(all_prices)>=40 else sma30_p
     sma30_slope = sma30_p - sma30_prev
-    # Histórico reciente sin última vela
     recent_prices = all_prices[-61:-1] if len(all_prices)>=61 else all_prices[:-1]
     high_recent = max(recent_prices) if recent_prices else current_price+3
     low_recent = min(recent_prices) if recent_prices else current_price-3
     is_acc=band<4.0 and avg6<2.0 and avg_body<1.2
-    is_exp=avg3>avg6*1.4
     up=down=0
     for c in reversed(candles_10):
         if c["bullish"]:
@@ -294,66 +276,55 @@ def detect_phase(candles_10, candles_15, rows):
     sma10_prev=sum([c["close"] for c in candles_10[-6:-1]])/5 if len(candles_10)>=6 else sma10
     slope=sma10-sma10_prev
     last=candles_10[-1]
-    # RUPTURA REAL - debe superar por +1 USD no por 0.999 factor (tu bug 4048 rompió 4050)
     is_real_break_high = current_price > high_recent + 1.0 and last["bullish"] and last["strong"]
     is_real_break_low = current_price < low_recent - 1.0 and not last["bullish"] and last["strong"]
-    # Si venía de acumulación 4054-4065 y rompió arriba 4072 y luego cayó debajo 4054 = EXPANSION BAJISTA (tu foto)
     if current_price < low_recent and sma30_slope < -0.3 and current_price < sma30_p:
-        return {"phase":"EXPANSION_BAJISTA","desc":f"EXPANSIÓN BAJISTA - RUPTURA ABAJO {low_recent:.2f} -> {current_price:.2f} (-{low_recent-current_price:.2f}) - SMA30 cayendo {sma30_slope:.2f}","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down if down>0 else 3,"slope":slope,"is_acc":False,"is_exp":True,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
+        return {"phase":"EXPANSION_BAJISTA","desc":f"EXPANSIÓN BAJISTA - RUPTURA ABAJO","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down if down>0 else 3,"slope":slope,"is_acc":False,"is_exp":True,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
     if current_price > high_recent and sma30_slope > 0.3 and current_price > sma30_p:
-        return {"phase":"EXPANSION_ALCISTA","desc":f"EXPANSIÓN ALCISTA - RUPTURA ARRIBA {high_recent:.2f} -> {current_price:.2f} (+{current_price-high_recent:.2f})","band":band,"avg6":avg6,"avg3":avg3,"up":up if up>0 else 3,"down":0,"slope":slope,"is_acc":False,"is_exp":True,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
-    # Tendencia mayor manda: si SMA30 cae y precio bajo SMA30 y bajo SMA60 = BAJISTA aunque haya vela verde de rebote
+        return {"phase":"EXPANSION_ALCISTA","desc":f"EXPANSIÓN ALCISTA - RUPTURA ARRIBA","band":band,"avg6":avg6,"avg3":avg3,"up":up if up>0 else 3,"down":0,"slope":slope,"is_acc":False,"is_exp":True,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
     if current_price < sma30_p and sma30_p < sma60_p and sma30_slope < -0.15:
-        # Aunque última vela sea alcista (pico de subida en caída), sigue bajista
-        desc_extra = f" - pico alcista dentro de caída (última vela verde pero SMA30 baja {sma30_slope:.2f})" if last["bullish"] else ""
-        return {"phase":"TENDENCIA_BAJISTA","desc":f"TENDENCIA BAJISTA - precio {current_price:.2f} bajo SMA30 {sma30_p:.2f} y SMA60 {sma60_p:.2f} - pendiente {sma30_slope:.2f}{desc_extra} - 4H {low_4h:.2f}-{high_4h:.2f}","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down if down>0 else 2,"slope":sma30_slope,"is_acc":False,"is_exp":False,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
+        return {"phase":"TENDENCIA_BAJISTA","desc":f"TENDENCIA BAJISTA - SMA30 pendiente {sma30_slope:.2f}","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down if down>0 else 2,"slope":sma30_slope,"is_acc":False,"is_exp":False,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
     if current_price > sma30_p and sma30_p > sma60_p and sma30_slope > 0.15:
-        desc_extra = f" - pico bajista dentro de subida" if not last["bullish"] else ""
-        return {"phase":"TENDENCIA_ALCISTA","desc":f"TENDENCIA ALCISTA - precio {current_price:.2f} sobre SMA30 {sma30_p:.2f} y SMA60 {sma60_p:.2f} - pendiente {sma30_slope:.2f}{desc_extra}","band":band,"avg6":avg6,"avg3":avg3,"up":up if up>0 else 2,"down":0,"slope":sma30_slope,"is_acc":False,"is_exp":False,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
+        return {"phase":"TENDENCIA_ALCISTA","desc":f"TENDENCIA ALCISTA - SMA30 pendiente {sma30_slope:.2f}","band":band,"avg6":avg6,"avg3":avg3,"up":up if up>0 else 2,"down":0,"slope":sma30_slope,"is_acc":False,"is_exp":False,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
     if is_real_break_high:
-        return {"phase":"EXPANSION_ALCISTA","desc":f"EXPANSIÓN ALCISTA - PICO COMPRA real {high_recent:.2f} -> {current_price:.2f} (+{current_price-high_recent:.2f})","band":band,"avg6":avg6,"avg3":avg3,"up":up if up>0 else 3,"down":0,"slope":slope,"is_acc":False,"is_exp":True,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
+        return {"phase":"EXPANSION_ALCISTA","desc":f"EXPANSIÓN ALCISTA - PICO COMPRA","band":band,"avg6":avg6,"avg3":avg3,"up":up if up>0 else 3,"down":0,"slope":slope,"is_acc":False,"is_exp":True,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
     if is_real_break_low:
-        return {"phase":"EXPANSION_BAJISTA","desc":f"EXPANSIÓN BAJISTA - PICO VENTA real {low_recent:.2f} -> {current_price:.2f} (-{low_recent-current_price:.2f})","band":band,"avg6":avg6,"avg3":avg3,"up":0,"down":down if down>0 else 3,"slope":slope,"is_acc":False,"is_exp":True,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
+        return {"phase":"EXPANSION_BAJISTA","desc":f"EXPANSIÓN BAJISTA - PICO VENTA","band":band,"avg6":avg6,"avg3":avg3,"up":0,"down":down if down>0 else 3,"slope":slope,"is_acc":False,"is_exp":True,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
     if is_acc:
-        return {"phase":"ACUMULACION","desc":f"ACUMULACIÓN - rango {band:.1f} USD estrecho, vol {avg6:.1f} USD - 4H {low_4h:.2f}-{high_4h:.2f}","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":slope,"is_acc":True,"is_exp":False,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
-    if up>=3 and sma30_slope>=0:
-        return {"phase":"TENDENCIA_ALCISTA","desc":f"TENDENCIA ALCISTA - {up} velas alcistas - pendiente {sma30_slope:.2f}","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":0,"slope":sma30_slope,"is_acc":False,"is_exp":False,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
-    if down>=3 and sma30_slope<=0:
-        return {"phase":"TENDENCIA_BAJISTA","desc":f"TENDENCIA BAJISTA - {down} velas bajistas - pendiente {sma30_slope:.2f}","band":band,"avg6":avg6,"avg3":avg3,"up":0,"down":down,"slope":sma30_slope,"is_acc":False,"is_exp":False,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
-    # Si no hay tendencia clara, usar pendiente SMA30 como desempate
-    if sma30_slope < -0.2:
-        return {"phase":"TENDENCIA_BAJISTA","desc":f"TENDENCIA BAJISTA DÉBIL - SMA30 cayendo {sma30_slope:.2f} - pico alcista actual {current_price:.2f} es solo rebote","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":1,"slope":sma30_slope,"is_acc":False,"is_exp":False,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
-    if sma30_slope > 0.2:
-        return {"phase":"TENDENCIA_ALCISTA","desc":f"TENDENCIA ALCISTA DÉBIL - SMA30 subiendo {sma30_slope:.2f}","band":band,"avg6":avg6,"avg3":avg3,"up":1,"down":0,"slope":sma30_slope,"is_acc":False,"is_exp":False,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
-    return {"phase":"TRANSICION","desc":f"TRANSICIÓN - vol {avg3:.1f} USD - SMA30 plano {sma30_slope:.2f} - 4H {low_4h:.2f}-{high_4h:.2f}","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":sma30_slope,"is_acc":False,"is_exp":False,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
+        return {"phase":"ACUMULACION","desc":f"ACUMULACIÓN - rango {band:.1f} USD estrecho","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":slope,"is_acc":True,"is_exp":False,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
+    return {"phase":"TRANSICION","desc":f"TRANSICIÓN - SMA30 plano {sma30_slope:.2f}","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":sma30_slope,"is_acc":False,"is_exp":False,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
 
 def analyze_gold_pro():
     try:
         rows=get_gold_history(600)
         price_fallback=get_gold_price()
         if len(rows)<20:
-            return {"trend":"INICIO","direction":"BUY","confidence":55,"phase":"INICIO","phase_desc":"Iniciando","alert":"ESPERA - INICIANDO","alert_type":"WAIT","points_detail":[],"candle_patterns":[],"high_10":price_fallback+3.5,"low_10":price_fallback-3.2,"high_15":price_fallback+5.8,"low_15":price_fallback-5.1,"high_30":price_fallback+8.5,"low_30":price_fallback-8.2,"sma10":price_fallback-0.8,"sma15":price_fallback-1.2,"sma30":price_fallback-1.8,"support":price_fallback-5.1,"resistance":price_fallback+5.8,"support_long":price_fallback-7,"resistance_long":price_fallback+7,"high_long":price_fallback+7,"low_long":price_fallback-7,"band_long":14,"volatility":3.2,"ny_session":False,"buy_score":0,"sell_score":0,"up_streak":0,"down_streak":0,"current_price":price_fallback,"fib":None,"high_clusters":[],"low_clusters":[]}
+            return {"trend":"INICIO","direction":"BUY","confidence":55,"phase":"INICIO","phase_desc":"Iniciando","alert":"ESPERA - INICIANDO","alert_type":"WAIT","points_detail":[],"candle_patterns":[],"smc_pats":[],"ag_bands":None,"high_10":price_fallback,"low_10":price_fallback,"high_15":price_fallback,"low_15":price_fallback,"high_30":price_fallback,"low_30":price_fallback,"sma10":price_fallback,"sma15":price_fallback,"sma30":price_fallback,"support":price_fallback,"resistance":price_fallback,"support_long":price_fallback,"resistance_long":price_fallback,"high_long":price_fallback,"low_long":price_fallback,"band_long":14,"volatility":3,"ny_session":False,"buy_score":0,"sell_score":0,"up_streak":0,"down_streak":0,"current_price":price_fallback,"fib":None,"high_clusters":[],"low_clusters":[]}
+        
         candles_10=build_candles(rows,20); candles_15=build_candles(rows,30); candles_30=build_candles(rows,60)
-        # Precio vivo para entrada
         live_price=rows[-1][0]
         prices = [r[0] for r in rows]
-        # Para análisis estable 15 min - usar vela cerrada 15m, no tick que oscila
+        
         closed_10, forming_10 = get_closed_candles(candles_10)
         closed_15, forming_15 = get_closed_candles(candles_15)
         closed_30, forming_30 = get_closed_candles(candles_30)
-        # Si hay cerradas, usar cierre de última cerrada como precio de análisis (estable)
-        if closed_15 and len(closed_15)>=1:
-            analysis_price = closed_15[-1]["close"]
-        elif closed_10 and len(closed_10)>=1:
-            analysis_price = closed_10[-1]["close"]
-        else:
-            analysis_price = live_price
-        current_price = analysis_price  # para cálculos de fase y SMA - estable 15m
-        # Para mostrar, guardamos ambos
+        
+        if closed_15 and len(closed_15)>=1: analysis_price = closed_15[-1]["close"]
+        elif closed_10 and len(closed_10)>=1: analysis_price = closed_10[-1]["close"]
+        else: analysis_price = live_price
+        
+        current_price = analysis_price
         real_current_price = live_price
+        
         sma10 = sum(prices[-10:])/10 if len(prices)>=10 else current_price
         sma15 = sum(prices[-15:])/15 if len(prices)>=15 else current_price
         sma30 = sum(prices[-30:])/30 if len(prices)>=30 else current_price
+        
+        # --- CÁLCULOS ANTIGRAVITY Y SMART MONEY ---
+        ag_bands = calc_antigravity_bands(prices, period=20, dev=2.5)
+        smc_pats = detect_smart_money(candles_15) + detect_smart_money(candles_10)
+        # ------------------------------------------
+
         recent_prices = prices[-31:-1] if len(prices)>=31 else prices[:-1]
         high_recent = max(recent_prices) if recent_prices else current_price+3
         low_recent = min(recent_prices) if recent_prices else current_price-3
@@ -369,15 +340,11 @@ def analyze_gold_pro():
         hour_ec=datetime.now(EC_TZ).hour
         ny_session=8<=hour_ec<=11
         buy_score=0; sell_score=0; points_detail=[]
-        # Variables con valores seguros anti-cero
-        support_long = low_15
-        resistance_long = high_15
-        support_far = low_15
-        resistance_far = high_15
-        long_sr = None
-        fib = None
-        fib_detail = []
-        # SR largo y Fibonacci con manejo de errores
+        
+        support_long = low_15; resistance_long = high_15
+        support_far = low_15; resistance_far = high_15
+        long_sr = None; fib = None; fib_detail = []
+        
         try:
             long_sr = get_long_sr(rows, 4)
             if long_sr and long_sr.get("support",0)>1000:
@@ -385,77 +352,75 @@ def analyze_gold_pro():
                 resistance_long = long_sr["resistance"]
                 support_far = long_sr.get("support_far", support_long)
                 resistance_far = long_sr.get("resistance_far", resistance_long)
-        except:
-            support_long = low_15
-            resistance_long = high_15
+        except: pass
+
         try:
             fib = calc_fibonacci_impulse(rows)
             if fib and fib.get("near") in ["0.618","0.5","0.382"]:
                 if fib["dir"]=="ALCISTA" and fib["near"] in ["0.618","0.5"]:
                     buy_score+=2
-                    fib_detail.append({"side":"BUY","points":2,"name":f"FIB {fib['near']} RETROCESO ALCISTA","reason":f"Impulso alcista {fib['low']:.2f}->{fib['high']:.2f} ({fib['range']:.1f} USD) - Precio {fib['current']:.2f} en Fib {fib['near']} {fib['levels'][fib['near']]:.2f} - zona compra"})
+                    fib_detail.append({"side":"BUY","points":2,"name":f"FIB {fib['near']} RETROCESO ALCISTA","reason":f"Impulso alcista - zona compra"})
                 elif fib["dir"]=="BAJISTA" and fib["near"] in ["0.618","0.5"]:
                     sell_score+=2
-                    fib_detail.append({"side":"SELL","points":2,"name":f"FIB {fib['near']} RETROCESO BAJISTA","reason":f"Impulso bajista {fib['high']:.2f}->{fib['low']:.2f} - Precio en Fib {fib['near']} - zona venta"})
-            if fib and fib.get("near")=="0":
-                if fib["dir"]=="ALCISTA":
-                    buy_score+=2
-                    fib_detail.append({"side":"BUY","points":2,"name":"FIB 0 RUPTURA ALCISTA","reason":f"Ruptura Fib 0 alcista {fib['high']:.2f}"})
-                else:
-                    sell_score+=2
-                    fib_detail.append({"side":"SELL","points":2,"name":"FIB 0 RUPTURA BAJISTA","reason":f"Ruptura Fib 0 bajista {fib['low']:.2f}"})
-        except:
-            fib = None
-        for f in fib_detail:
-            points_detail.append(f)
-        # Soporte y resistencia principal = pivotes 4H
-        if support_long and support_long>1000:
-            support = support_long
-        if resistance_long and resistance_long>1000:
-            resistance = resistance_long
+                    fib_detail.append({"side":"SELL","points":2,"name":f"FIB {fib['near']} RETROCESO BAJISTA","reason":f"Impulso bajista - zona venta"})
+        except: fib = None
+        for f in fib_detail: points_detail.append(f)
+
+        if support_long and support_long>1000: support = support_long
+        if resistance_long and resistance_long>1000: resistance = resistance_long
+        
         is_break_high = current_price > high_recent + 1.0
         is_break_low = current_price < low_recent - 1.0
         last_10 = candles_10[-1] if candles_10 else {"bullish":True,"strong":False,"body":1,"body_ratio":0.5,"range":2}
-        # SMA
+        
+        # --- PUNTUACIÓN ANTIGRAVITY ---
+        if ag_bands:
+            if current_price >= ag_bands["upper"]:
+                sell_score += 4
+                points_detail.append({"side": "SELL", "points": 4, "name": "ANTIGRAVITY SELL", "reason": f"Precio {current_price:.2f} rompió banda superior {ag_bands['upper']:.2f} (+2.5 SD). Probable reversión bajista."})
+            elif current_price <= ag_bands["lower"]:
+                buy_score += 4
+                points_detail.append({"side": "BUY", "points": 4, "name": "ANTIGRAVITY BUY", "reason": f"Precio {current_price:.2f} rompió banda inferior {ag_bands['lower']:.2f} (-2.5 SD). Probable reversión alcista."})
+
+        # --- PUNTUACIÓN SMART MONEY (FVG/OB) ---
+        for pat in smc_pats:
+            if pat["dir"] == "BUY":
+                buy_score += pat["strength"]
+                points_detail.append({"side": "BUY", "points": pat["strength"], "name": pat["name"], "reason": pat["desc"]})
+            else:
+                sell_score += pat["strength"]
+                points_detail.append({"side": "SELL", "points": pat["strength"], "name": pat["name"], "reason": pat["desc"]})
+
+        # --- SMA Retail Score ---
         if current_price>sma10 and sma10>sma15 and sma15>sma30:
-            buy_score+=3; points_detail.append({"side":"BUY","points":3,"name":"SMA ALCISTA FUERTE","reason":f"Precio {current_price:.2f} > SMA10 {sma10:.2f} > SMA15 {sma15:.2f} > SMA30 {sma30:.2f}"})
+            buy_score+=3; points_detail.append({"side":"BUY","points":3,"name":"SMA ALCISTA FUERTE","reason":f"Precio > SMA10 > SMA15 > SMA30"})
         elif current_price<sma10 and sma10<sma15 and sma15<sma30:
-            sell_score+=3; points_detail.append({"side":"SELL","points":3,"name":"SMA BAJISTA FUERTE","reason":f"Precio {current_price:.2f} < SMA10 {sma10:.2f} < SMA15 {sma15:.2f} < SMA30 {sma30:.2f}"})
-        elif current_price>sma10 and current_price>sma15:
-            buy_score+=1; points_detail.append({"side":"BUY","points":1,"name":"SMA ALCISTA DÉBIL","reason":f"Precio {current_price:.2f} > SMA10 {sma10:.2f} y SMA15 {sma15:.2f}"})
-        elif current_price<sma10 and current_price<sma15:
-            sell_score+=1; points_detail.append({"side":"SELL","points":1,"name":"SMA BAJISTA DÉBIL","reason":f"Precio {current_price:.2f} < SMA10 {sma10:.2f} y SMA15 {sma15:.2f}"})
-        # Ruptura
+            sell_score+=3; points_detail.append({"side":"SELL","points":3,"name":"SMA BAJISTA FUERTE","reason":f"Precio < SMA10 < SMA15 < SMA30"})
+        
         if is_break_high and last_10["bullish"]:
             pts = 3 if last_10["strong"] else 2
-            buy_score+=pts; points_detail.append({"side":"BUY","points":pts,"name":"RUPTURA ALTA 10m FUERTE" if last_10["strong"] else "RUPTURA ALTA 10m","reason":f"Ruptura alto real {high_recent:.2f} -> {current_price:.2f} (+{current_price-high_recent:.2f})"})
+            buy_score+=pts; points_detail.append({"side":"BUY","points":pts,"name":"RUPTURA ALTA","reason":f"Ruptura alto real"})
         if is_break_low and not last_10["bullish"]:
             pts = 3 if last_10["strong"] else 2
-            sell_score+=pts; points_detail.append({"side":"SELL","points":pts,"name":"RUPTURA BAJA 10m FUERTE" if last_10["strong"] else "RUPTURA BAJA 10m","reason":f"Ruptura bajo real {low_recent:.2f} -> {current_price:.2f}"})
-        # Cerca soporte/resistencia
+            sell_score+=pts; points_detail.append({"side":"SELL","points":pts,"name":"RUPTURA BAJA","reason":f"Ruptura bajo real"})
+        
         if abs(current_price-high_15) < 2.5:
-            buy_score+=2; points_detail.append({"side":"BUY","points":2,"name":"CERCA RESISTENCIA 15m","reason":f"Precio {current_price:.2f} cerca resistencia 15m {high_15:.2f}"})
+            buy_score+=2; points_detail.append({"side":"BUY","points":2,"name":"CERCA RESISTENCIA 15m","reason":f"Cerca resistencia"})
         if abs(current_price-low_15) < 2.5:
-            sell_score+=2; points_detail.append({"side":"SELL","points":2,"name":"CERCA SOPORTE 15m","reason":f"Precio {current_price:.2f} cerca soporte 15m {low_15:.2f}"})
-        # Racha
+            sell_score+=2; points_detail.append({"side":"SELL","points":2,"name":"CERCA SOPORTE 15m","reason":f"Cerca soporte"})
+        
         up_streak=phase_info["up"]; down_streak=phase_info["down"]
-        if up_streak>=3:
-            buy_score+=2; points_detail.append({"side":"BUY","points":2,"name":f"RACHA {up_streak} VELAS ALCISTAS 10m","reason":f"Racha alcista {up_streak} velas"})
-        if down_streak>=3:
-            sell_score+=2; points_detail.append({"side":"SELL","points":2,"name":f"RACHA {down_streak} VELAS BAJISTAS 10m","reason":f"Racha bajista {down_streak} velas"})
-        # Vela fuerte
+        if up_streak>=3: buy_score+=2; points_detail.append({"side":"BUY","points":2,"name":f"RACHA VELAS ALCISTAS","reason":f"Racha alcista"})
+        if down_streak>=3: sell_score+=2; points_detail.append({"side":"SELL","points":2,"name":f"RACHA VELAS BAJISTAS","reason":f"Racha bajista"})
+        
         if last_10["strong"]:
-            if last_10["bullish"]:
-                buy_score+=1; points_detail.append({"side":"BUY","points":1,"name":"VELA FUERTE ALCISTA","reason":f"Vela alcista fuerte ratio {last_10['body_ratio']:.2f}"})
-            else:
-                sell_score+=1; points_detail.append({"side":"SELL","points":1,"name":"VELA FUERTE BAJISTA","reason":f"Vela bajista fuerte ratio {last_10['body_ratio']:.2f}"})
-        # Sesión NY
+            if last_10["bullish"]: buy_score+=1; points_detail.append({"side":"BUY","points":1,"name":"VELA FUERTE ALCISTA","reason":f"Vela alcista fuerte"})
+            else: sell_score+=1; points_detail.append({"side":"SELL","points":1,"name":"VELA FUERTE BAJISTA","reason":f"Vela bajista fuerte"})
+        
         if ny_session:
-            if last_10["bullish"]:
-                buy_score+=1; points_detail.append({"side":"BUY","points":1,"name":"SESIÓN NY 8-10AM EC","reason":"NY OPEN - vela alcista +1 compra"})
-            else:
-                sell_score+=1; points_detail.append({"side":"SELL","points":1,"name":"SESIÓN NY 8-10AM EC","reason":"NY OPEN - vela bajista +1 venta"})
-        # Patrones velas
+            if last_10["bullish"]: buy_score+=1; points_detail.append({"side":"BUY","points":1,"name":"SESIÓN NY","reason":"NY OPEN compra"})
+            else: sell_score+=1; points_detail.append({"side":"SELL","points":1,"name":"SESIÓN NY","reason":"NY OPEN venta"})
+            
         for pat in candle_pats:
             if pat["dir"]=="BUY":
                 buy_score+=pat["strength"]
@@ -463,30 +428,27 @@ def analyze_gold_pro():
             else:
                 sell_score+=pat["strength"]
                 points_detail.append({"side":"SELL","points":pat["strength"],"name":pat["name"],"reason":pat["desc"]})
+                
         if "EXPANSION_ALCISTA" in phase_info["phase"]:
             buy_score+=2; points_detail.append({"side":"BUY","points":2,"name":"FASE EXPANSIÓN ALCISTA","reason":phase_info["desc"]})
         elif "EXPANSION_BAJISTA" in phase_info["phase"]:
             sell_score+=2; points_detail.append({"side":"SELL","points":2,"name":"FASE EXPANSIÓN BAJISTA","reason":phase_info["desc"]})
-        # v8.4: Tendencia mayor 4H manda - si SMA30 baja, penalizar compras aunque haya rebote verde
+            
         sma30_slope_val = phase_info.get("sma30_slope",0)
         if sma30_slope_val < -0.2:
-            # Tendencia 4H bajista - los picos alcistas son rebotes, no cambio tendencia
-            # Quitar puntos BUY débiles si tendencia mayor bajista
             for p in points_detail:
-                if p["side"]=="BUY" and p["points"]<=1 and "DÉBIL" in p["name"]:
-                    p["points"]=0
+                if p["side"]=="BUY" and p["points"]<=1 and "DÉBIL" in p["name"]: p["points"]=0
             points_detail = [p for p in points_detail if p["points"]>0]
+            
         real_buy = sum(p['points'] for p in points_detail if p['side']=='BUY')
         real_sell = sum(p['points'] for p in points_detail if p['side']=='SELL')
         buy_score = real_buy; sell_score = real_sell
-        # Bonus tendencia mayor
+        
         if "BAJISTA" in phase_info["phase"] and sma30_slope_val < -0.2:
-            sell_score += 1
-            points_detail.append({"side":"SELL","points":1,"name":"TENDENCIA MAYOR 4H BAJISTA","reason":f"SMA30 pendiente {sma30_slope_val:.2f} bajando - picos alcistas son rebotes en expansión bajista como tu foto 4072->4046"})
+            sell_score += 1; points_detail.append({"side":"SELL","points":1,"name":"TENDENCIA MAYOR BAJISTA","reason":f"SMA30 cayendo"})
         if "ALCISTA" in phase_info["phase"] and sma30_slope_val > 0.2:
-            buy_score += 1
-            points_detail.append({"side":"BUY","points":1,"name":"TENDENCIA MAYOR 4H ALCISTA","reason":f"SMA30 pendiente {sma30_slope_val:.2f} subiendo"})
-        # Dirección debe ser coherente con score, no contradictoria
+            buy_score += 1; points_detail.append({"side":"BUY","points":1,"name":"TENDENCIA MAYOR ALCISTA","reason":f"SMA30 subiendo"})
+            
         if buy_score==0 and sell_score>=2:
             direction="SELL"; base_conf=68
             if "EXPANSION" in phase_info["phase"] or "BAJISTA" in phase_info["phase"]: base_conf=76
@@ -504,59 +466,53 @@ def analyze_gold_pro():
             if "EXPANSION" in phase_info["phase"]: base_conf=78
             confidence=base_conf+min(sell_score*2,16)
         else:
-            # Empate - usar tendencia mayor, no precio vs SMA15 que oscila
             sma30_s = phase_info.get("sma30_slope",0)
-            if sma30_s < -0.2:
-                direction="SELL"; confidence=58
-            elif sma30_s > 0.2:
-                direction="BUY"; confidence=58
-            else:
-                direction="BUY" if current_price>sma15 else "SELL"; confidence=56
-        # Acumulación amplia vs estrecha
+            if sma30_s < -0.2: direction="SELL"; confidence=58
+            elif sma30_s > 0.2: direction="BUY"; confidence=58
+            else: direction="BUY" if current_price>sma15 else "SELL"; confidence=56
+            
         long_is_acc = long_sr["is_acc_long"] if long_sr else False
         long_band = long_sr["band_long"] if long_sr else phase_info["band"]
         support_real = long_sr["support"] if long_sr and long_sr.get("support",0)>1000 else support
         resistance_real = long_sr["resistance"] if long_sr and long_sr.get("resistance",0)>1000 else resistance
+        
         if long_is_acc and long_band < 7.0:
-            alert=f"ESPERA - ACUMULACIÓN ESTRECHA {long_band:.1f} USD - NO OPERAR"; alert_type="WAIT"; alert_desc=f"Precio entre {long_sr['low_long']:.2f} y {long_sr['high_long']:.2f} - acumulación estrecha - esperar ruptura"
+            alert="ESPERA - ACUMULACIÓN ESTRECHA - NO OPERAR"; alert_type="WAIT"; alert_desc="Acumulación estrecha - esperar ruptura"
             confidence = 52
         elif long_is_acc and long_band >= 10.0:
-            dist_to_support = abs(current_price - support_real)
-            dist_to_resistance = abs(current_price - resistance_real)
-            if dist_to_support < 1.8:
-                buy_score+=2
-                points_detail.append({"side":"BUY","points":2,"name":"CORTE SOPORTE EN ACUMULACIÓN AMPLIA","reason":f"Acumulación amplia {long_band:.1f} USD - cerca soporte {support_real:.2f}"})
+            if abs(current_price - support_real) < 1.8:
+                buy_score+=2; points_detail.append({"side":"BUY","points":2,"name":"CORTE SOPORTE EN ACUMULACIÓN","reason":f"Cerca soporte"})
                 if confidence < 70: confidence = 70
-            if dist_to_resistance < 1.8:
-                sell_score+=2
-                points_detail.append({"side":"SELL","points":2,"name":"CORTE RESISTENCIA EN ACUMULACIÓN AMPLIA","reason":f"Acumulación amplia {long_band:.1f} USD - cerca resistencia {resistance_real:.2f}"})
+            if abs(current_price - resistance_real) < 1.8:
+                sell_score+=2; points_detail.append({"side":"SELL","points":2,"name":"CORTE RESISTENCIA EN ACUMULACIÓN","reason":f"Cerca resistencia"})
                 if confidence < 70: confidence = 70
-            # No bloquear acumulación amplia
             if "ACUMULACION" in phase_info["phase"]:
                 phase_info["phase"]="RANGO AMPLIO"
-                phase_info["desc"]=f"RANGO AMPLIO {long_band:.1f} USD - {support_real:.2f} a {resistance_real:.2f} - scalping con impulso y retroceso Fib"
-        if "ACUMULACION" in phase_info["phase"] and long_band>=10:
-            pass
+                phase_info["desc"]=f"RANGO AMPLIO {long_band:.1f} USD"
+                
+        if "ACUMULACION" in phase_info["phase"] and long_band>=10: pass
         elif "ACUMULACION" in phase_info["phase"] and not "EXPANSION" in phase_info["phase"] and long_band<7:
-            alert="ESPERA - NO ENTRES - FASE ACUMULACIÓN"; alert_type="WAIT"; alert_desc=f"Acumulación rango {phase_info['band']:.1f} USD - esperar pico"
+            alert="ESPERA - NO ENTRES - FASE ACUMULACIÓN"; alert_type="WAIT"; alert_desc="Esperar pico"
         elif "EXPANSION" in phase_info["phase"] and confidence>=70:
-            fib_txt = f" + Fib {fib['near']}" if fib and fib.get('near') else ""
-            alert=f"ENTRA - PICO TRAS ACUMULACIÓN + VELA CONFIRMADA - {direction} - SEÑAL LIMPIA{fib_txt}"; alert_type="ENTER"; alert_desc=f"{phase_info['phase']}{fib_txt} - confianza {confidence}% - Score {buy_score}B/{sell_score}S"
+            alert=f"ENTRA - PICO TRAS ACUMULACIÓN - {direction}"; alert_type="ENTER"; alert_desc=f"{phase_info['phase']} - conf {confidence}%"
         elif fib and fib.get('near') in ['0.618','0.5'] and confidence>=65:
-            alert=f"ENTRA - {direction} EN FIB {fib['near']} - RETROCESO PERFECTO"; alert_type="ENTER"; alert_desc=f"Fibonacci {fib['near']} - {fib['desc']} - Score {buy_score}B/{sell_score}S"
+            alert=f"ENTRA - {direction} EN FIB {fib['near']}"; alert_type="ENTER"; alert_desc=f"Fibonacci {fib['near']} - Score {buy_score}B/{sell_score}S"
         elif confidence>=72 and abs(buy_score-sell_score)>=2:
-            alert=f"ENTRA - {direction} CONFIRMADO - TENDENCIA FUERTE"; alert_type="ENTER"; alert_desc=f"Score {buy_score} vs {sell_score} - confianza {confidence}%"
+            alert=f"ENTRA - {direction} CONFIRMADO"; alert_type="ENTER"; alert_desc=f"Score {buy_score} vs {sell_score}"
         elif confidence>=62 and abs(buy_score-sell_score)>=1:
-            alert=f"ENTRA CON PRECAUCIÓN - {direction} - CONFIRMACIÓN MEDIA"; alert_type="CAUTION"; alert_desc=f"Score {buy_score}B/{sell_score}S - espera vela fuerte"
+            alert=f"ENTRA CON PRECAUCIÓN - {direction}"; alert_type="CAUTION"; alert_desc=f"Espera confirmación de volumen"
         else:
-            alert="ESPERA - SEÑAL DÉBIL - RANGO"; alert_type="WAIT"; alert_desc=f"Score {buy_score}B/{sell_score}S - fase {phase_info['phase']}"
+            alert="ESPERA - SEÑAL DÉBIL - RANGO"; alert_type="WAIT"; alert_desc=f"Score {buy_score}B/{sell_score}S"
+            
         trend="ALCISTA" if direction=="BUY" else "BAJISTA"
         if abs(buy_score-sell_score)<=1: trend="LATERAL"
+        
         return {
             "trend":trend,"direction":direction,"confidence":min(confidence,95),
-            "pattern":phase_info["phase"],"phase":phase_info["phase"],"phase_desc":phase_info["desc"] + f" - análisis vela 15m cerrada {analysis_price:.2f} (viva {real_current_price:.2f} oscilando)",
+            "pattern":phase_info["phase"],"phase":phase_info["phase"],"phase_desc":phase_info["desc"],
             "phase_info":phase_info,"alert":alert,"alert_type":alert_type,"alert_desc":alert_desc,
             "candle_patterns":candle_pats,"points_detail":points_detail,
+            "ag_bands": ag_bands, "smc_pats": smc_pats, # ENVIADOS AL FRONTEND
             "analysis_price":analysis_price,"live_price":real_current_price,
             "reason":" | ".join([p["name"] for p in points_detail[:3]]),
             "high_10":high_10,"low_10":low_10,"high_15":high_15,"low_15":low_15,"high_30":high_30,"low_30":low_30,
@@ -574,8 +530,8 @@ def analyze_gold_pro():
             "hour_ec":hour_ec,"current_price":current_price
         }
     except Exception as e:
-        print(f"analyze error {e}"); import traceback; traceback.print_exc()
-        return {"trend":"ERROR","direction":"BUY","confidence":50,"phase":"ERROR","phase_desc":str(e),"alert":f"ESPERA - ERROR {e}","alert_type":"WAIT","alert_desc":str(e),"points_detail":[],"candle_patterns":[],"high_10":0,"low_10":0,"high_15":0,"low_15":0,"high_30":0,"low_30":0,"sma10":0,"sma15":0,"sma30":0,"support":4052,"resistance":4073,"support_long":4052,"resistance_long":4073,"high_long":4073,"low_long":4052,"band_long":21,"fib":None,"high_clusters":[],"low_clusters":[],"volatility":0,"ny_session":False,"buy_score":0,"sell_score":0}
+        print(f"analyze error {e}")
+        return {"trend":"ERROR","direction":"BUY","confidence":50,"phase":"ERROR","alert":"ESPERA - ERROR","alert_type":"WAIT","points_detail":[],"candle_patterns":[],"smc_pats":[],"ag_bands":None,"high_10":0,"low_10":0,"high_15":0,"low_15":0,"sma10":0,"sma15":0,"sma30":0,"support":4052,"resistance":4073,"band_long":21,"fib":None,"volatility":0,"buy_score":0,"sell_score":0}
 
 def get_last_signal():
     try:
@@ -594,7 +550,6 @@ def update_last_signal(direction, phase):
     except: pass
 
 def should_flip(new_dir, conf, market):
-    # v8.6 - fix contradicción: si es 0 vs 2, debe cambiar aunque hayan pasado 0.2m
     try:
         last=get_last_signal()
         if last["direction"]==new_dir: return True, f"Misma dirección {new_dir} - estable"
@@ -609,38 +564,24 @@ def should_flip(new_dir, conf, market):
             try:
                 last_time=datetime.fromisoformat(row[0])
                 mins_passed=(datetime.now(EC_TZ)-last_time).total_seconds()/60
-            except:
-                mins_passed = 999
-        # CASO 1 - REVERSA CLARA 0 vs 2 o más - cambiar inmediato, no es oscilación
+            except: mins_passed = 999
         if (buy_score==0 and sell_score>=2 and new_dir=="SELL") or (sell_score==0 and buy_score>=2 and new_dir=="BUY"):
-            return True, f"Reversa clara {buy_score}B/{sell_score}S - cambia inmediato a {new_dir} (anterior {last['direction']} tenía 0 puntos)"
-        # CASO 2 - Tendencia mayor confirma nuevo lado
+            return True, f"Reversa clara {buy_score}B/{sell_score}S - cambia inmediato a {new_dir}"
         if "BAJISTA" in phase and new_dir=="SELL" and last["direction"]=="BUY" and sma30_slope < -0.3:
-            return True, f"Tendencia mayor 4H bajista SMA30 {sma30_slope:.2f} confirma SELL - corrige BUY erróneo tras {mins_passed:.1f}m"
+            return True, f"Tendencia mayor 4H bajista confirma SELL tras {mins_passed:.1f}m"
         if "ALCISTA" in phase and new_dir=="BUY" and last["direction"]=="SELL" and sma30_slope > 0.3:
             return True, f"Tendencia mayor 4H alcista confirma BUY tras {mins_passed:.1f}m"
-        # CASO 3 - Expansión fuerte
         if "EXPANSION" in phase and conf>=70 and diff>=2:
-            return True, f"Expansión {phase} tras {mins_passed:.1f}m - cambio urgente a {new_dir} conf {conf}%"
-        # CASO 4 - Bloquear solo oscilaciones pequeñas dentro misma vela formándose
+            return True, f"Expansión {phase} - cambio a {new_dir}"
         if mins_passed < 3:
-            # Si hace menos de 3 min y diff es 1 y ambos tienen puntos, es oscilación de tick
-            if diff <=1 and buy_score>0 and sell_score>0:
-                return False, f"Oscilación vela formándose - van {mins_passed:.1f}m - mantiene {last['direction']} (Score {buy_score}B/{sell_score}S diff {diff} pequeño)"
-            # Si es 0 vs 1 también bloquear 3 min? No, dejar pasar si es 0 vs 2 ya cubierto arriba
-        # CASO 5 - Estable 15m pero permitir si confianza decente
+            if diff <=1 and buy_score>0 and sell_score>0: return False, f"Oscilación vela formándose - van {mins_passed:.1f}m"
         if mins_passed < 15:
-            if conf>=66 and diff>=2:
-                return True, f"Cambio tras {mins_passed:.1f}m a {new_dir} - conf {conf}% diff {diff} - análisis 15m cerrado estable"
-            return False, f"Señal estable 15m - faltan {15-mins_passed:.1f}m para reevaluar (van {mins_passed:.1f}m) - mantiene {last['direction']} - nueva {new_dir} ignorada por oscilación leve"
-        # Después de 15 min
-        if diff>=2 and conf>=66:
-            return True, f"Cambio confirmado tras {mins_passed:.1f}m - Score {buy_score}B/{sell_score}S diff {diff} a {new_dir}"
-        if mins_passed>=15 and conf>=66:
-            return True, f"Cambio tras {mins_passed:.1f}m a {new_dir} - conf {conf}%"
-        return False, f"Esperando confirmación - confianza {conf}% insuficiente para {new_dir} - mantiene {last['direction']}"
-    except Exception as e:
-        return True, f"Error {e} - permite cambio"
+            if conf>=66 and diff>=2: return True, f"Cambio tras {mins_passed:.1f}m a {new_dir} - conf {conf}% diff {diff}"
+            return False, f"Señal estable 15m - van {mins_passed:.1f}m - mantiene {last['direction']}"
+        if diff>=2 and conf>=66: return True, f"Cambio confirmado tras {mins_passed:.1f}m"
+        if mins_passed>=15 and conf>=66: return True, f"Cambio tras {mins_passed:.1f}m a {new_dir}"
+        return False, f"Confianza {conf}% insuficiente para {new_dir} - mantiene {last['direction']}"
+    except Exception as e: return True, f"Error {e} - permite cambio"
 
 def get_stats():
     try:
@@ -682,10 +623,8 @@ def calc_prob(hour, market):
 
 def calc_tp_sl(price, direction):
     d=6.17
-    if direction=="BUY":
-        return price-d, price+d, price+d*2, price+d*3, d, d, d*2, d*3
-    else:
-        return price+d, price-d, price-d*2, price-d*3, d, d, d*2, d*3
+    if direction=="BUY": return price-d, price+d, price+d*2, price+d*3, d, d, d*2, d*3
+    else: return price+d, price-d, price-d*2, price-d*3, d, d, d*2, d*3
 
 def update_stats(result, direction):
     try:
@@ -702,13 +641,13 @@ def update_stats(result, direction):
     except: pass
 
 @app.get("/")
-def root(): return {"message":"ORO FASES + PUNTOS + FIB - 100% ESPAÑOL","version":"8.3"}
+def root(): return {"message":"ORO FASES + PUNTOS + FIB + ANTIGRAVITY","version":"8.5"}
 
 @app.get("/health")
 def health():
     conn=sqlite3.connect(DB_PATH); c=conn.cursor()
     c.execute("SELECT COUNT(*) FROM price_history"); count=c.fetchone()[0]; conn.close()
-    return {"status":"ok","symbol":"XAUUSD","history":count,"version":"8.3"}
+    return {"status":"ok","symbol":"XAUUSD","history":count,"version":"8.5"}
 
 @app.get("/signals/live")
 def signals_live():
@@ -726,7 +665,6 @@ def signals_live():
         market_for_prob['direction'] = final_dir
         prob,stats,p1,p2,p3,wr_dir,wr_glob=calc_prob(hour, market_for_prob)
         display_prob = market.get('confidence', prob) if market.get('alert_type')=='ENTER' else prob
-        # Entry es precio vivo, pero dirección viene de análisis vela cerrada 15m estable
         live_for_entry = market.get("live_price", price)
         analysis_for_dir = market.get("analysis_price", price)
         sl,tp1,tp2,tp3,sl_d,tp1_d,tp2_d,tp3_d=calc_tp_sl(live_for_entry, final_dir)
@@ -740,6 +678,7 @@ def signals_live():
             market['alert_type'] = "WAIT"
             market['alert_desc'] = f"Score {market.get('buy_score')}B/{market.get('sell_score')}S quiere {new_dir} pero mantiene {final_dir}"
         market['confidence'] = market.get('confidence', conf)
+        
         signal={
             "symbol":"XAUUSD","direction":final_dir,"entry":live_for_entry,"sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp3,"sl_distance":sl_d,"tp1_distance":tp1_d,"analysis_price":analysis_for_dir,"live_price":live_for_entry,
             "probability":display_prob,"confidence":conf,"probability_tp1":prob,"win_rate":wr_glob,"win_rate_direction":wr_dir,
@@ -754,8 +693,8 @@ def signals_live():
         }
         return [signal]
     except Exception as e:
-        print(e); import traceback; traceback.print_exc()
-        return [{"symbol":"XAUUSD","direction":"BUY","entry":get_gold_price(),"sl":get_gold_price()-6.17,"tp1":get_gold_price()+6.17,"tp2":get_gold_price()+12.34,"tp3":get_gold_price()+18.51,"sl_distance":6.17,"tp1_distance":6.17,"probability":55,"confidence":55,"probability_tp1":50,"win_rate":72,"win_rate_direction":70,"win_rate_buy":75,"win_rate_sell":70,"is_optimal_hour":False,"market_analysis":{"phase":"ERROR","phase_desc":str(e),"alert":f"ESPERA - ERROR {str(e)[:100]}","alert_type":"WAIT","alert_desc":str(e),"points_detail":[],"candle_patterns":[],"high_10":0,"low_10":0,"high_15":0,"low_15":0,"support":4052,"resistance":4073,"support_long":4052,"resistance_long":4073,"band_long":21,"fib":None},"phase":"ERROR","phase_desc":str(e),"alert":f"ESPERA - ERROR {str(e)[:100]}","alert_type":"WAIT","alert_desc":str(e),"candle_patterns":[],"points_detail":[],"probabilidad_nuevos_objetivos":{"prob_tp1_10usd_10_15min":50,"prob_tp2_20usd_15min":30,"prob_tp3_30usd_15min":15},"sl_explain":"","tp_explain":"","reason":"","pattern":"","flip_reason":str(e),"support":4052,"resistance":4073,"timestamp":datetime.now(EC_TZ).isoformat()}]
+        print(e)
+        return [{"symbol":"XAUUSD","direction":"BUY","entry":get_gold_price(),"sl":get_gold_price()-6.17,"tp1":get_gold_price()+6.17,"tp2":get_gold_price()+12.34,"tp3":get_gold_price()+18.51,"sl_distance":6.17,"tp1_distance":6.17,"probability":55,"confidence":55,"probability_tp1":50,"win_rate":72,"win_rate_direction":70,"win_rate_buy":75,"win_rate_sell":70,"is_optimal_hour":False,"market_analysis":{"phase":"ERROR","alert":"ESPERA - ERROR","alert_type":"WAIT","points_detail":[],"candle_patterns":[],"smc_pats":[],"ag_bands":None,"support":4052,"resistance":4073,"band_long":21,"fib":None},"phase":"ERROR","alert":"ESPERA - ERROR","alert_type":"WAIT","candle_patterns":[],"points_detail":[],"probabilidad_nuevos_objetivos":{"prob_tp1_10usd_10_15min":50,"prob_tp2_20usd_15min":30,"prob_tp3_30usd_15min":15},"sl_explain":"","tp_explain":"","reason":"","pattern":"","flip_reason":str(e),"support":4052,"resistance":4073,"timestamp":datetime.now(EC_TZ).isoformat()}]
 
 @app.get("/trades/active")
 def get_active():
@@ -783,7 +722,7 @@ def gold_analysis():
 async def startup_event():
     seed_history_if_empty()
     async def monitor_loop():
-        print("Monitor ORO v8.3 100% español iniciado")
+        print("Monitor ORO v8.5 Antigravity iniciado")
         while True:
             try: save_gold_history(get_gold_price())
             except: pass

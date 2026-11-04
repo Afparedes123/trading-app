@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 
-app = FastAPI(title="EdgeAlert ORO - SCALPER DINÁMICO")
+app = FastAPI(title="EdgeAlert ORO - SCALPER ALTA PRECISIÓN")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 EC_TZ = timezone(timedelta(hours=-5))
@@ -110,17 +110,17 @@ def detect_candle_patterns(candles):
     if len(candles)<2: return []
     pats=[]; last=candles[-1]; prev=candles[-2]
     if not prev["bullish"] and last["bullish"] and last["open"]<prev["close"] and last["close"]>prev["open"] and last["body"]>prev["body"]*1.2:
-        pats.append({"name":"ENVOLVENTE ALCISTA","dir":"BUY","strength":3,"desc":"Envolvente alcista - compra fuerte"})
+        pats.append({"name":"ENVOLVENTE ALCISTA","dir":"COMPRA","strength":3,"desc":"Envolvente alcista fuerte"})
     if prev["bullish"] and not last["bullish"] and last["open"]>prev["close"] and last["close"]<prev["open"] and last["body"]>prev["body"]*1.2:
-        pats.append({"name":"ENVOLVENTE BAJISTA","dir":"SELL","strength":3,"desc":"Envolvente bajista - venta fuerte"})
+        pats.append({"name":"ENVOLVENTE BAJISTA","dir":"VENTA","strength":3,"desc":"Envolvente bajista fuerte"})
     if last["lower_wick"]>last["body"]*2 and last["upper_wick"]<last["body"]*0.5 and last["range"]>1.0:
-        pats.append({"name":"MARTILLO","dir":"BUY","strength":2,"desc":"Martillo alcista - rechazo bajos"})
+        pats.append({"name":"MARTILLO","dir":"COMPRA","strength":2,"desc":"Rechazo en bajos"})
     if last["upper_wick"]>last["body"]*2 and last["lower_wick"]<last["body"]*0.5 and last["range"]>1.0:
-        pats.append({"name":"ESTRELLA FUGAZ","dir":"SELL","strength":2,"desc":"Estrella fugaz - rechazo altos"})
+        pats.append({"name":"ESTRELLA FUGAZ","dir":"VENTA","strength":2,"desc":"Rechazo en altos"})
     if last["bullish"] and last["body_ratio"]>0.8:
-        pats.append({"name":"MARUBOZU ALCISTA","dir":"BUY","strength":2,"desc":"Marubozu alcista - fuerza compra"})
+        pats.append({"name":"MARUBOZU ALCISTA","dir":"COMPRA","strength":2,"desc":"Fuerza compradora"})
     if not last["bullish"] and last["body_ratio"]>0.8:
-        pats.append({"name":"MARUBOZU BAJISTA","dir":"SELL","strength":2,"desc":"Marubozu bajista - fuerza venta"})
+        pats.append({"name":"MARUBOZU BAJISTA","dir":"VENTA","strength":2,"desc":"Fuerza vendedora"})
     return pats
 
 def calc_antigravity_bands(prices, period=20, dev=2.5):
@@ -136,13 +136,13 @@ def detect_smart_money(candles):
     smc_signals = []
     c1, c2, c3 = candles[-3], candles[-2], candles[-1]
     if c1["high"] < c3["low"] and c2["bullish"] and c2["strong"]:
-        smc_signals.append({"name": "FVG ALCISTA", "dir": "BUY", "strength": 3, "desc": f"Vacío liquidez SMC"})
+        smc_signals.append({"name": "FVG ALCISTA", "dir": "COMPRA", "strength": 4, "desc": f"Vacío de liquidez confirmado"})
     if c1["low"] > c3["high"] and not c2["bullish"] and c2["strong"]:
-        smc_signals.append({"name": "FVG BAJISTA", "dir": "SELL", "strength": 3, "desc": f"Vacío liquidez SMC"})
+        smc_signals.append({"name": "FVG BAJISTA", "dir": "VENTA", "strength": 4, "desc": f"Vacío de liquidez confirmado"})
     if c2["strong"] and c2["bullish"] and not c1["bullish"]:
-        smc_signals.append({"name": "ORDER BLOCK ALCISTA", "dir": "BUY", "strength": 2, "desc": f"Bloque de órdenes {c1['low']:.2f}"})
+        smc_signals.append({"name": "ORDER BLOCK ALCISTA", "dir": "COMPRA", "strength": 3, "desc": f"Bloque de órdenes {c1['low']:.2f}"})
     if c2["strong"] and not c2["bullish"] and c1["bullish"]:
-        smc_signals.append({"name": "ORDER BLOCK BAJISTA", "dir": "SELL", "strength": 2, "desc": f"Bloque de órdenes {c1['high']:.2f}"})
+        smc_signals.append({"name": "ORDER BLOCK BAJISTA", "dir": "VENTA", "strength": 3, "desc": f"Bloque de órdenes {c1['high']:.2f}"})
     return smc_signals
 
 def get_long_sr(rows, lookback_hours=4):
@@ -199,18 +199,14 @@ def calc_fibonacci_impulse(rows):
         else: return None
         current = prices[-1]
         fib_levels = {
-            "0": impulse_high if impulse_dir=="ALCISTA" else impulse_low,
-            "0.236": impulse_high - impulse_range*0.236 if impulse_dir=="ALCISTA" else impulse_low + impulse_range*0.236,
             "0.382": impulse_high - impulse_range*0.382 if impulse_dir=="ALCISTA" else impulse_low + impulse_range*0.382,
             "0.5": impulse_high - impulse_range*0.5 if impulse_dir=="ALCISTA" else impulse_low + impulse_range*0.5,
             "0.618": impulse_high - impulse_range*0.618 if impulse_dir=="ALCISTA" else impulse_low + impulse_range*0.618,
-            "0.786": impulse_high - impulse_range*0.786 if impulse_dir=="ALCISTA" else impulse_low + impulse_range*0.786,
-            "1": impulse_low if impulse_dir=="ALCISTA" else impulse_high,
         }
         near_fib = None; min_dist = 999
         for level, price_fib in fib_levels.items():
             dist = abs(current - price_fib)
-            if dist < min_dist and dist < 1.8: min_dist, near_fib = dist, level
+            if dist < min_dist and dist < 1.5: min_dist, near_fib = dist, level
         return {
             "dir": impulse_dir, "low": impulse_low, "high": impulse_high, "range": impulse_range,
             "current": current, "levels": fib_levels, "near": near_fib, "dist": min_dist if near_fib else None,
@@ -251,28 +247,20 @@ def detect_phase(candles_10, candles_15, rows):
     slope=sma10-sma10_prev; last=candles_10[-1]
     is_real_break_high = current_price > high_recent + 1.0 and last["bullish"] and last["strong"]
     is_real_break_low = current_price < low_recent - 1.0 and not last["bullish"] and last["strong"]
-    if current_price < low_recent and sma30_slope < -0.3 and current_price < sma30_p:
-        return {"phase":"EXPANSION_BAJISTA","desc":"EXPANSIÓN BAJISTA","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down if down>0 else 3,"slope":slope,"is_acc":False,"is_exp":True,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
-    if current_price > high_recent and sma30_slope > 0.3 and current_price > sma30_p:
-        return {"phase":"EXPANSION_ALCISTA","desc":"EXPANSIÓN ALCISTA","band":band,"avg6":avg6,"avg3":avg3,"up":up if up>0 else 3,"down":0,"slope":slope,"is_acc":False,"is_exp":True,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
-    if current_price < sma30_p and sma30_p < sma60_p and sma30_slope < -0.15:
-        return {"phase":"TENDENCIA_BAJISTA","desc":f"TENDENCIA BAJISTA","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down if down>0 else 2,"slope":sma30_slope,"is_acc":False,"is_exp":False,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
-    if current_price > sma30_p and sma30_p > sma60_p and sma30_slope > 0.15:
-        return {"phase":"TENDENCIA_ALCISTA","desc":f"TENDENCIA ALCISTA","band":band,"avg6":avg6,"avg3":avg3,"up":up if up>0 else 2,"down":0,"slope":sma30_slope,"is_acc":False,"is_exp":False,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
-    if is_real_break_high:
-        return {"phase":"EXPANSION_ALCISTA","desc":"PICO COMPRA","band":band,"avg6":avg6,"avg3":avg3,"up":up if up>0 else 3,"down":0,"slope":slope,"is_acc":False,"is_exp":True,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
-    if is_real_break_low:
-        return {"phase":"EXPANSION_BAJISTA","desc":"PICO VENTA","band":band,"avg6":avg6,"avg3":avg3,"up":0,"down":down if down>0 else 3,"slope":slope,"is_acc":False,"is_exp":True,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
-    if is_acc:
-        return {"phase":"ACUMULACION","desc":"ACUMULACIÓN","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":slope,"is_acc":True,"is_exp":False,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
-    return {"phase":"TRANSICION","desc":"TRANSICIÓN","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":sma30_slope,"is_acc":False,"is_exp":False,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
+    
+    if is_acc: return {"phase":"ACUMULACION","desc":"ACUMULACIÓN (Lateral)","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":slope,"is_acc":True,"is_exp":False,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
+    if current_price < low_recent and sma30_slope < -0.3 and current_price < sma30_p: return {"phase":"EXPANSION_BAJISTA","desc":"EXPANSIÓN BAJISTA","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down if down>0 else 3,"slope":slope,"is_acc":False,"is_exp":True,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
+    if current_price > high_recent and sma30_slope > 0.3 and current_price > sma30_p: return {"phase":"EXPANSION_ALCISTA","desc":"EXPANSIÓN ALCISTA","band":band,"avg6":avg6,"avg3":avg3,"up":up if up>0 else 3,"down":0,"slope":slope,"is_acc":False,"is_exp":True,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
+    if current_price < sma30_p and sma30_slope < -0.15: return {"phase":"TENDENCIA_BAJISTA","desc":f"TENDENCIA BAJISTA","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down if down>0 else 2,"slope":sma30_slope,"is_acc":False,"is_exp":False,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
+    if current_price > sma30_p and sma30_slope > 0.15: return {"phase":"TENDENCIA_ALCISTA","desc":f"TENDENCIA ALCISTA","band":band,"avg6":avg6,"avg3":avg3,"up":up if up>0 else 2,"down":0,"slope":sma30_slope,"is_acc":False,"is_exp":False,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
+    return {"phase":"TRANSICION","desc":"TRANSICIÓN (Mercado en Duda)","band":band,"avg6":avg6,"avg3":avg3,"up":up,"down":down,"slope":sma30_slope,"is_acc":False,"is_exp":False,"high_4h":high_4h,"low_4h":low_4h,"sma30_slope":sma30_slope}
 
 def analyze_gold_pro():
     try:
         rows=get_gold_history(600)
         price_fallback=get_gold_price()
         if len(rows)<20:
-            return {"trend":"INICIO","direction":"BUY","confidence":55,"phase":"INICIO","phase_desc":"Iniciando","alert":"ESPERA - INICIANDO","alert_type":"WAIT","points_detail":[],"candle_patterns":[],"smc_pats":[],"ag_bands":None,"high_10":price_fallback,"low_10":price_fallback,"high_15":price_fallback,"low_15":price_fallback,"high_30":price_fallback,"low_30":price_fallback,"sma10":price_fallback,"sma15":price_fallback,"sma30":price_fallback,"support":price_fallback,"resistance":price_fallback,"support_long":price_fallback,"resistance_long":price_fallback,"high_long":price_fallback,"low_long":price_fallback,"band_long":14,"volatility":3,"ny_session":False,"buy_score":0,"sell_score":0,"up_streak":0,"down_streak":0,"current_price":price_fallback,"fib":None,"high_clusters":[],"low_clusters":[]}
+            return {"trend":"INICIO","direction":"COMPRA","confidence":55,"phase":"INICIO","phase_desc":"Iniciando","alert":"ESPERA - INICIANDO","alert_type":"WAIT","points_detail":[],"candle_patterns":[],"smc_pats":[],"ag_bands":None,"high_10":price_fallback,"low_10":price_fallback,"high_15":price_fallback,"low_15":price_fallback,"high_30":price_fallback,"low_30":price_fallback,"sma10":price_fallback,"sma15":price_fallback,"sma30":price_fallback,"support":price_fallback,"resistance":price_fallback,"support_long":price_fallback,"resistance_long":price_fallback,"high_long":price_fallback,"low_long":price_fallback,"band_long":14,"volatility":3,"ny_session":False,"buy_score":0,"sell_score":0,"up_streak":0,"down_streak":0,"current_price":price_fallback,"fib":None,"high_clusters":[],"low_clusters":[]}
         
         candles_10=build_candles(rows,20); candles_15=build_candles(rows,30); candles_30=build_candles(rows,60)
         live_price=rows[-1][0]
@@ -280,7 +268,6 @@ def analyze_gold_pro():
         
         closed_10, forming_10 = get_closed_candles(candles_10)
         closed_15, forming_15 = get_closed_candles(candles_15)
-        closed_30, forming_30 = get_closed_candles(candles_30)
         
         if closed_15 and len(closed_15)>=1: analysis_price = closed_15[-1]["close"]
         elif closed_10 and len(closed_10)>=1: analysis_price = closed_10[-1]["close"]
@@ -299,12 +286,9 @@ def analyze_gold_pro():
         recent_prices = prices[-31:-1] if len(prices)>=31 else prices[:-1]
         high_recent = max(recent_prices) if recent_prices else current_price+3
         low_recent = min(recent_prices) if recent_prices else current_price-3
-        high_10 = max([c["high"] for c in candles_10[-3:]]) if len(candles_10)>=3 else high_recent
-        low_10 = min([c["low"] for c in candles_10[-3:]]) if len(candles_10)>=3 else low_recent
         high_15 = max([c["high"] for c in candles_15[-2:]]) if len(candles_15)>=2 else high_recent+1.5
         low_15 = min([c["low"] for c in candles_15[-2:]]) if len(candles_15)>=2 else low_recent-1.5
-        high_30 = max([c["high"] for c in candles_30[-2:]]) if len(candles_30)>=2 else high_15+1
-        low_30 = min([c["low"] for c in candles_30[-2:]]) if len(candles_30)>=2 else low_15-1
+        
         support=low_15; resistance=high_15
         phase_info=detect_phase(candles_10,candles_15,rows)
         candle_pats=detect_candle_patterns(candles_10)+detect_candle_patterns(candles_15)
@@ -312,186 +296,111 @@ def analyze_gold_pro():
         ny_session=8<=hour_ec<=11
         buy_score=0; sell_score=0; points_detail=[]
         
-        support_long = low_15; resistance_long = high_15
-        support_far = low_15; resistance_far = high_15
         long_sr = None; fib = None; fib_detail = []
         
         try:
             long_sr = get_long_sr(rows, 4)
             if long_sr and long_sr.get("support",0)>1000:
-                support_long = long_sr["support"]
-                resistance_long = long_sr["resistance"]
-                support_far = long_sr.get("support_far", support_long)
-                resistance_far = long_sr.get("resistance_far", resistance_long)
+                support = long_sr["support"]
+                resistance = long_sr["resistance"]
         except: pass
 
         try:
             fib = calc_fibonacci_impulse(rows)
-            if fib and fib.get("near") in ["0.618","0.5","0.382"]:
-                if fib["dir"]=="ALCISTA" and fib["near"] in ["0.618","0.5"]:
-                    buy_score+=2
-                    fib_detail.append({"side":"BUY","points":2,"name":f"FIB {fib['near']} RETROCESO ALCISTA","reason":f"Impulso alcista - zona compra"})
-                elif fib["dir"]=="BAJISTA" and fib["near"] in ["0.618","0.5"]:
-                    sell_score+=2
-                    fib_detail.append({"side":"SELL","points":2,"name":f"FIB {fib['near']} RETROCESO BAJISTA","reason":f"Impulso bajista - zona venta"})
+            if fib and fib.get("near"):
+                if fib["dir"]=="ALCISTA":
+                    buy_score+=3; fib_detail.append({"side":"COMPRA","points":3,"name":f"FIB {fib['near']} RETROCESO","reason":f"Soporte dorado Fibonacci"})
+                elif fib["dir"]=="BAJISTA":
+                    sell_score+=3; fib_detail.append({"side":"VENTA","points":3,"name":f"FIB {fib['near']} RETROCESO","reason":f"Rechazo bajista Fibonacci"})
         except: fib = None
         for f in fib_detail: points_detail.append(f)
-
-        if support_long and support_long>1000: support = support_long
-        if resistance_long and resistance_long>1000: resistance = resistance_long
         
-        is_break_high = current_price > high_recent + 1.0
-        is_break_low = current_price < low_recent - 1.0
         last_10 = candles_10[-1] if candles_10 else {"bullish":True,"strong":False,"body":1,"body_ratio":0.5,"range":2}
         
         if ag_bands:
             if current_price >= ag_bands["upper"]:
-                sell_score += 4
-                points_detail.append({"side": "SELL", "points": 4, "name": "ANTIGRAVITY SELL", "reason": f"Precio rompió techo (+2.5 SD)."})
+                sell_score += 5; points_detail.append({"side": "VENTA", "points": 5, "name": "AGOTAMIENTO TECHO", "reason": f"El precio rompió el techo matemático (+2.5 SD)."})
             elif current_price <= ag_bands["lower"]:
-                buy_score += 4
-                points_detail.append({"side": "BUY", "points": 4, "name": "ANTIGRAVITY BUY", "reason": f"Precio rompió suelo (-2.5 SD)."})
+                buy_score += 5; points_detail.append({"side": "COMPRA", "points": 5, "name": "AGOTAMIENTO SUELO", "reason": f"El precio rompió el suelo matemático (-2.5 SD)."})
 
         for pat in smc_pats:
-            if pat["dir"] == "BUY":
-                buy_score += pat["strength"]
-                points_detail.append({"side": "BUY", "points": pat["strength"], "name": pat["name"], "reason": pat["desc"]})
+            if pat["dir"] == "COMPRA":
+                buy_score += pat["strength"]; points_detail.append({"side": "COMPRA", "points": pat["strength"], "name": pat["name"], "reason": pat["desc"]})
             else:
-                sell_score += pat["strength"]
-                points_detail.append({"side": "SELL", "points": pat["strength"], "name": pat["name"], "reason": pat["desc"]})
+                sell_score += pat["strength"]; points_detail.append({"side": "VENTA", "points": pat["strength"], "name": pat["name"], "reason": pat["desc"]})
 
         if current_price>sma10 and sma10>sma15 and sma15>sma30:
-            buy_score+=3; points_detail.append({"side":"BUY","points":3,"name":"SMA ALCISTA FUERTE","reason":f"Precio > SMA10 > SMA15 > SMA30"})
+            buy_score+=2; points_detail.append({"side":"COMPRA","points":2,"name":"TENDENCIA MICRO ALCISTA","reason":f"El precio lidera las medias"})
         elif current_price<sma10 and sma10<sma15 and sma15<sma30:
-            sell_score+=3; points_detail.append({"side":"SELL","points":3,"name":"SMA BAJISTA FUERTE","reason":f"Precio < SMA10 < SMA15 < SMA30"})
+            sell_score+=2; points_detail.append({"side":"VENTA","points":2,"name":"TENDENCIA MICRO BAJISTA","reason":f"El precio presiona las medias"})
         
-        if is_break_high and last_10["bullish"]:
-            pts = 3 if last_10["strong"] else 2
-            buy_score+=pts; points_detail.append({"side":"BUY","points":pts,"name":"RUPTURA ALTA","reason":f"Ruptura alto real"})
-        if is_break_low and not last_10["bullish"]:
-            pts = 3 if last_10["strong"] else 2
-            sell_score+=pts; points_detail.append({"side":"SELL","points":pts,"name":"RUPTURA BAJA","reason":f"Ruptura bajo real"})
-        
-        if abs(current_price-high_15) < 2.5:
-            buy_score+=2; points_detail.append({"side":"BUY","points":2,"name":"CERCA RESISTENCIA 15m","reason":f"Cerca resistencia"})
-        if abs(current_price-low_15) < 2.5:
-            sell_score+=2; points_detail.append({"side":"SELL","points":2,"name":"CERCA SOPORTE 15m","reason":f"Cerca soporte"})
-        
-        up_streak=phase_info["up"]; down_streak=phase_info["down"]
-        if up_streak>=3: buy_score+=2; points_detail.append({"side":"BUY","points":2,"name":f"RACHA VELAS ALCISTAS","reason":f"Racha alcista"})
-        if down_streak>=3: sell_score+=2; points_detail.append({"side":"SELL","points":2,"name":f"RACHA VELAS BAJISTAS","reason":f"Racha bajista"})
-        
-        if last_10["strong"]:
-            if last_10["bullish"]: buy_score+=1; points_detail.append({"side":"BUY","points":1,"name":"VELA FUERTE ALCISTA","reason":f"Vela alcista fuerte"})
-            else: sell_score+=1; points_detail.append({"side":"SELL","points":1,"name":"VELA FUERTE BAJISTA","reason":f"Vela bajista fuerte"})
+        if abs(current_price-resistance) < 2.0:
+            sell_score+=3; points_detail.append({"side":"VENTA","points":3,"name":"GOLPEA RESISTENCIA","reason":f"Zona de oferta fuerte"})
+        if abs(current_price-support) < 2.0:
+            buy_score+=3; points_detail.append({"side":"COMPRA","points":3,"name":"GOLPEA SOPORTE","reason":f"Zona de demanda fuerte"})
         
         for pat in candle_pats:
-            if pat["dir"]=="BUY":
-                buy_score+=pat["strength"]; points_detail.append({"side":"BUY","points":pat["strength"],"name":pat["name"],"reason":pat["desc"]})
+            if pat["dir"]=="COMPRA":
+                buy_score+=pat["strength"]; points_detail.append({"side":"COMPRA","points":pat["strength"],"name":pat["name"],"reason":pat["desc"]})
             else:
-                sell_score+=pat["strength"]; points_detail.append({"side":"SELL","points":pat["strength"],"name":pat["name"],"reason":pat["desc"]})
+                sell_score+=pat["strength"]; points_detail.append({"side":"VENTA","points":pat["strength"],"name":pat["name"],"reason":pat["desc"]})
                 
-        if "EXPANSION_ALCISTA" in phase_info["phase"]:
-            buy_score+=2; points_detail.append({"side":"BUY","points":2,"name":"FASE EXPANSIÓN ALCISTA","reason":phase_info["desc"]})
-        elif "EXPANSION_BAJISTA" in phase_info["phase"]:
-            sell_score+=2; points_detail.append({"side":"SELL","points":2,"name":"FASE EXPANSIÓN BAJISTA","reason":phase_info["desc"]})
-            
-        sma30_slope_val = phase_info.get("sma30_slope",0)
+        real_buy = sum(p['points'] for p in points_detail if p['side']=='COMPRA')
+        real_sell = sum(p['points'] for p in points_detail if p['side']=='VENTA')
         
-        real_buy = sum(p['points'] for p in points_detail if p['side']=='BUY')
-        real_sell = sum(p['points'] for p in points_detail if p['side']=='SELL')
-        
-        # --- FILTRO ANTI-LAG: DETECTOR DE IMPULSOS VIVOS EN CONTRA ---
+        # --- FILTRO ANTI-LAG ENDURECIDO (1.5 USD) ---
         live_diff = real_current_price - analysis_price
         
-        if live_diff > 2.2: 
-            # El mercado está subiendo de golpe, anula las señales de venta
-            points_detail = [p for p in points_detail if p["side"] != "SELL"]
-            points_detail.append({"side": "BUY", "points": 5, "name": "🚨 IMPULSO VIVO ALCISTA", "reason": f"Sube +${live_diff:.2f} en vivo vs vela cerrada."})
-            real_buy += 5; real_sell = 0
+        if live_diff > 1.5: 
+            points_detail = [p for p in points_detail if p["side"] != "VENTA"]
+            points_detail.append({"side": "COMPRA", "points": 6, "name": "🚨 IMPULSO VIVO", "reason": f"El precio acaba de subir +${live_diff:.2f} rompiendo el análisis previo."})
+            real_buy += 6; real_sell = 0
             
-        elif live_diff < -2.2: 
-            # El mercado está cayendo de golpe, anula las señales de compra
-            points_detail = [p for p in points_detail if p["side"] != "BUY"]
-            points_detail.append({"side": "SELL", "points": 5, "name": "🚨 IMPULSO VIVO BAJISTA", "reason": f"Cae -${abs(live_diff):.2f} en vivo vs vela cerrada."})
-            real_sell += 5; real_buy = 0
+        elif live_diff < -1.5: 
+            points_detail = [p for p in points_detail if p["side"] != "COMPRA"]
+            points_detail.append({"side": "VENTA", "points": 6, "name": "🚨 CAÍDA VIVA", "reason": f"El precio acaba de caer -${abs(live_diff):.2f} rompiendo el análisis previo."})
+            real_sell += 6; real_buy = 0
         # -------------------------------------------------------------
         
         buy_score = real_buy; sell_score = real_sell
 
-        if buy_score==0 and sell_score>=2:
-            direction="SELL"; base_conf=68
-            if "EXPANSION" in phase_info["phase"] or "BAJISTA" in phase_info["phase"]: base_conf=76
-            confidence=base_conf+min(sell_score*2,12)
-        elif sell_score==0 and buy_score>=2:
-            direction="BUY"; base_conf=68
-            if "EXPANSION" in phase_info["phase"] or "ALCISTA" in phase_info["phase"]: base_conf=76
-            confidence=base_conf+min(buy_score*2,12)
-        elif buy_score>=sell_score+2:
-            direction="BUY"; base_conf=62
-            if "EXPANSION" in phase_info["phase"]: base_conf=78
-            confidence=base_conf+min(buy_score*2,16)
-        elif sell_score>=buy_score+2:
-            direction="SELL"; base_conf=62
-            if "EXPANSION" in phase_info["phase"]: base_conf=78
-            confidence=base_conf+min(sell_score*2,16)
+        if buy_score==0 and sell_score>=4:
+            direction="VENTA"; confidence=75 + min(sell_score*2, 20)
+        elif sell_score==0 and buy_score>=4:
+            direction="COMPRA"; confidence=75 + min(buy_score*2, 20)
+        elif buy_score>=sell_score+3:
+            direction="COMPRA"; confidence=65 + min(buy_score*2, 20)
+        elif sell_score>=buy_score+3:
+            direction="VENTA"; confidence=65 + min(sell_score*2, 20)
         else:
-            sma30_s = phase_info.get("sma30_slope",0)
-            if sma30_s < -0.2: direction="SELL"; confidence=58
-            elif sma30_s > 0.2: direction="BUY"; confidence=58
-            else: direction="BUY" if current_price>sma15 else "SELL"; confidence=56
+            direction="ESPERA"; confidence=50
             
-        long_is_acc = long_sr["is_acc_long"] if long_sr else False
-        long_band = long_sr["band_long"] if long_sr else phase_info["band"]
-        support_real = long_sr["support"] if long_sr and long_sr.get("support",0)>1000 else support
-        resistance_real = long_sr["resistance"] if long_sr and long_sr.get("resistance",0)>1000 else resistance
-        
-        if long_is_acc and long_band < 7.0:
-            alert="ESPERA - ACUMULACIÓN ESTRECHA"; alert_type="WAIT"; alert_desc="Acumulación estrecha - esperar ruptura"
-            confidence = 52
-        elif long_is_acc and long_band >= 10.0:
-            if abs(current_price - support_real) < 1.8:
-                buy_score+=2; points_detail.append({"side":"BUY","points":2,"name":"CORTE SOPORTE","reason":f"Cerca soporte"})
-                if confidence < 70: confidence = 70
-            if abs(current_price - resistance_real) < 1.8:
-                sell_score+=2; points_detail.append({"side":"SELL","points":2,"name":"CORTE RESISTENCIA","reason":f"Cerca resistencia"})
-                if confidence < 70: confidence = 70
-                
-        if "EXPANSION" in phase_info["phase"] and confidence>=70:
-            alert=f"ENTRA - PICO TRAS ACUMULACIÓN - {direction}"; alert_type="ENTER"; alert_desc=f"{phase_info['phase']} - conf {confidence}%"
-        elif fib and fib.get('near') in ['0.618','0.5'] and confidence>=65:
-            alert=f"ENTRA - {direction} EN FIB {fib['near']}"; alert_type="ENTER"; alert_desc=f"Fibonacci {fib['near']} - Score {buy_score}B/{sell_score}S"
-        elif confidence>=72 and abs(buy_score-sell_score)>=2:
-            alert=f"ENTRA - {direction} CONFIRMADO"; alert_type="ENTER"; alert_desc=f"Score {buy_score} vs {sell_score}"
-        elif confidence>=62 and abs(buy_score-sell_score)>=1:
-            alert=f"ENTRA CON PRECAUCIÓN - {direction}"; alert_type="CAUTION"; alert_desc=f"Espera confirmación de volumen"
+        # Si el mercado está en acumulación lateral estrecha, forzamos espera a menos que la señal sea perfecta
+        if "ACUMULACION" in phase_info["phase"] and phase_info["band"] < 6.0 and confidence < 80:
+            alert="ESPERA - MERCADO LATERAL CONGELADO"; alert_type="WAIT"; alert_desc="El precio no se mueve. Peligro de trampas."
+            confidence = 50; direction = "ESPERA"
+        elif confidence>=75:
+            alert=f"✅ ENTRA AHORA - {direction} CONFIRMADA"; alert_type="ENTER"; alert_desc=f"Condiciones óptimas. Score {buy_score} vs {sell_score}"
         else:
-            alert="ESPERA - SEÑAL DÉBIL - RANGO"; alert_type="WAIT"; alert_desc=f"Score {buy_score}B/{sell_score}S"
+            alert="⏳ ESPERA - SEÑALES EN CONFLICTO"; alert_type="WAIT"; alert_desc=f"No hay una dirección clara (Score {buy_score}C / {sell_score}V)"
+            direction = "ESPERA"
             
-        trend="ALCISTA" if direction=="BUY" else "BAJISTA"
-        if abs(buy_score-sell_score)<=1: trend="LATERAL"
+        trend="ALCISTA" if direction=="COMPRA" else "BAJISTA" if direction=="VENTA" else "LATERAL"
         
         return {
-            "trend":trend,"direction":direction,"confidence":min(confidence,95),
+            "trend":trend,"direction":direction,"confidence":min(confidence,98),
             "pattern":phase_info["phase"],"phase":phase_info["phase"],"phase_desc":phase_info["desc"],
             "phase_info":phase_info,"alert":alert,"alert_type":alert_type,"alert_desc":alert_desc,
             "candle_patterns":candle_pats,"points_detail":points_detail,
             "ag_bands": ag_bands, "smc_pats": smc_pats, 
             "analysis_price":analysis_price,"live_price":real_current_price,
-            "reason":" | ".join([p["name"] for p in points_detail[:3]]),
-            "high_10":high_10,"low_10":low_10,"high_15":high_15,"low_15":low_15,"high_30":high_30,"low_30":low_30,
-            "high_long":long_sr["high_long"] if long_sr else high_15,
-            "low_long":long_sr["low_long"] if long_sr else low_15,
-            "band_long":long_band,"fib":fib,
-            "support_long":support_long if support_long>1000 else low_15,
-            "resistance_long":resistance_long if resistance_long>1000 else high_15,
-            "sma10":sma10,"sma15":sma15,"sma30":sma30,"support":support,"resistance":resistance,
+            "support":support,"resistance":resistance,
             "volatility":phase_info["avg3"],"buy_score":buy_score,"sell_score":sell_score,
             "hour_ec":hour_ec,"current_price":current_price
         }
     except Exception as e:
         print(f"analyze error {e}")
-        return {"trend":"ERROR","direction":"BUY","confidence":50,"phase":"ERROR","alert":"ESPERA - ERROR","alert_type":"WAIT","points_detail":[],"candle_patterns":[],"smc_pats":[],"ag_bands":None,"high_10":0,"low_10":0,"high_15":0,"low_15":0,"sma10":0,"sma15":0,"sma30":0,"support":4052,"resistance":4073,"band_long":21,"fib":None,"volatility":0,"buy_score":0,"sell_score":0}
+        return {"trend":"ERROR","direction":"ESPERA","confidence":50,"phase":"ERROR","alert":"ESPERA - ERROR","alert_type":"WAIT","points_detail":[],"candle_patterns":[],"smc_pats":[],"ag_bands":None,"support":4052,"resistance":4073,"fib":None,"volatility":0,"buy_score":0,"sell_score":0}
 
 def get_last_signal():
     try:
@@ -500,10 +409,11 @@ def get_last_signal():
         row=c.fetchone(); conn.close()
         if row: return {"direction":row[0],"confirmed_at":row[1],"phase":row[2]}
     except: pass
-    return {"direction":"BUY","confirmed_at":datetime.now(EC_TZ).isoformat(),"phase":"INICIO"}
+    return {"direction":"ESPERA","confirmed_at":datetime.now(EC_TZ).isoformat(),"phase":"INICIO"}
 
 def update_last_signal(direction, phase):
     try:
+        if direction == "ESPERA": return
         conn=sqlite3.connect(DB_PATH); c=conn.cursor()
         c.execute("INSERT OR REPLACE INTO last_signal (symbol,direction,confirmed_at,phase) VALUES (?,?,?,?)", ("XAUUSD",direction,datetime.now(EC_TZ).isoformat(),phase))
         conn.commit(); conn.close()
@@ -512,123 +422,85 @@ def update_last_signal(direction, phase):
 def should_flip(new_dir, conf, market):
     try:
         last=get_last_signal()
+        if new_dir == "ESPERA": return False, "El sistema pide esperar"
         if last["direction"]==new_dir: return True, f"Misma dirección {new_dir} - estable"
-        buy_score=market.get("buy_score",0); sell_score=market.get("sell_score",0); diff=abs(buy_score-sell_score)
         
-        # Si el filtro anti-lag inyectó 5 puntos, fuerza el giro inmediato para scalping
-        if (new_dir=="BUY" and buy_score >= 5 and sell_score == 0) or (new_dir=="SELL" and sell_score >= 5 and buy_score == 0):
-            return True, f"CAMBIO INMEDIATO SCALPING: Fuerte impulso detectado hacia {new_dir}"
+        buy_score=market.get("buy_score",0); sell_score=market.get("sell_score",0)
+        
+        # Filtro Anti-Lag para forzar el giro inmediato en scalping
+        if (new_dir=="COMPRA" and buy_score >= 6 and sell_score == 0) or (new_dir=="VENTA" and sell_score >= 6 and buy_score == 0):
+            return True, f"CAMBIO URGENTE: Impulso violento en contra detectado."
             
-        conn=sqlite3.connect(DB_PATH); c=conn.cursor()
-        c.execute("SELECT confirmed_at FROM last_signal WHERE symbol='XAUUSD'")
-        row=c.fetchone(); conn.close()
-        mins_passed = 999
-        if row and row[0]:
-            try: mins_passed=(datetime.now(EC_TZ)-datetime.fromisoformat(row[0])).total_seconds()/60
-            except: mins_passed = 999
-            
-        if mins_passed < 3:
-            if diff <=1: return False, f"Oscilación vela - van {mins_passed:.1f}m"
-        if mins_passed < 15:
-            if conf>=66 and diff>=2: return True, f"Cambio rápido a {new_dir} conf {conf}%"
-            return False, f"Señal 15m estable - van {mins_passed:.1f}m"
-            
-        if diff>=2 and conf>=66: return True, f"Cambio confirmado a {new_dir}"
-        return False, f"Confianza {conf}% insuficiente - mantiene {last['direction']}"
+        if conf>=75: return True, f"Nueva señal validada con {conf}%"
+        return False, f"Confianza {conf}% muy baja para invertir dirección."
     except Exception as e: return True, f"Error {e} - permite cambio"
-
-def get_stats():
-    return {"wins":18,"loss":6,"buy_wins":11,"buy_total":14,"sell_wins":7,"sell_total":10}
-
-def calc_success_rate(direction):
-    return 75,72,50,35
-
-def calc_prob(hour, market):
-    return 72.0,get_stats(),72,50,35,70,72
 
 def calc_tp_sl(price, direction, volatility=4.0):
     d = max(3.5, min(volatility * 1.2, 5.0))
-    if direction == "BUY":
-        return price - d, price + d, price + (d*1.5), price + (d*2.0), d, d, d*1.5, d*2.0
-    else:
-        return price + d, price - d, price - (d*1.5), price - (d*2.0), d, d, d*1.5, d*2.0
-
-def update_stats(result, direction):
-    pass
+    if direction == "COMPRA": return price - d, price + d, d
+    elif direction == "VENTA": return price + d, price - d, d
+    return 0, 0, 0
 
 @app.get("/")
-def root(): return {"message":"ORO SCALPER DINÁMICO ANTI-LAG","version":"8.6"}
+def root(): return {"message":"ORO SCALPER ALTA PRECISIÓN","version":"9.0"}
 
 @app.get("/health")
-def health(): return {"status":"ok","symbol":"XAUUSD","version":"8.6"}
+def health(): return {"status":"ok","symbol":"XAUUSD","version":"9.0"}
 
 @app.get("/signals/live")
 def signals_live():
     try:
         price=get_gold_price(); save_gold_history(price)
         market=analyze_gold_pro()
-        new_dir=market.get("direction","BUY"); conf=market.get("confidence",65)
+        new_dir=market.get("direction","ESPERA"); conf=market.get("confidence",50)
         
         should, flip_reason=should_flip(new_dir, conf, market)
         if should:
             final_dir=new_dir; update_last_signal(final_dir, market.get("phase",""))
         else:
-            last=get_last_signal(); final_dir=last["direction"]
+            last=get_last_signal()
+            # Si estábamos en COMPRA o VENTA y el sistema pasa a ESPERA, generamos la alerta de salida
+            if last["direction"] != "ESPERA" and new_dir == "ESPERA":
+                final_dir = "ESPERA"
+            else:
+                final_dir=last["direction"]
             
         hour=datetime.now(EC_TZ).hour
-        market_for_prob = dict(market); market_for_prob['direction'] = final_dir
-        prob,stats,p1,p2,p3,wr_dir,wr_glob=calc_prob(hour, market_for_prob)
         
-        display_prob = market.get('confidence', prob) if market.get('alert_type')=='ENTER' else prob
+        display_prob = conf
         live_for_entry = market.get("live_price", price)
         analysis_for_dir = market.get("analysis_price", price)
         
         vol = market.get("volatility", 4.0)
-        sl,tp1,tp2,tp3,sl_d,tp1_d,tp2_d,tp3_d=calc_tp_sl(live_for_entry, final_dir, vol)
+        sl, tp1, dist = calc_tp_sl(live_for_entry, final_dir, vol)
         
         market['direction'] = final_dir
         
-        # --- LÓGICA DE ALERTA DE SALIDA (TE DIGA SAL) ---
-        if final_dir != new_dir:
-            market['alert'] = f"🔴 SALIR AHORA: TENDENCIA GIRANDO A {new_dir}"
+        if final_dir == "ESPERA":
+            market['alert'] = f"🔴 SALIR Y ESPERAR: SEÑALES NULAS"
             market['alert_type'] = "EXIT"
-            market['alert_desc'] = f"Impulso en contra detectado. Cierra tu operación en {final_dir} manualmente."
-        else:
-            market['alert'] = market.get('alert', '')
-            market['alert_type'] = market.get('alert_type', '')
-            market['alert_desc'] = market.get('alert_desc', '')
-        # ------------------------------------------------
-        
-        market['confidence'] = market.get('confidence', conf)
+            market['alert_desc'] = f"El mercado perdió fuerza o se invirtió. Cierra tus posiciones."
+        elif final_dir != new_dir and new_dir != "ESPERA":
+            market['alert'] = f"🔴 PELIGRO: POSIBLE GIRO A {new_dir}"
+            market['alert_type'] = "EXIT"
+            market['alert_desc'] = f"Prepara tu salida, el mercado está intentando girarse."
         
         signal={
-            "symbol":"XAUUSD","direction":final_dir,"entry":live_for_entry,"sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp3,"sl_distance":sl_d,"tp1_distance":tp1_d,"analysis_price":analysis_for_dir,"live_price":live_for_entry,
-            "probability":display_prob,"confidence":conf,"probability_tp1":prob,"win_rate":wr_glob,"win_rate_direction":wr_dir,
-            "is_optimal_hour":8<=hour<=10,"market_analysis":market,"phase":market.get("phase",""),"phase_desc":market.get("phase_desc",""),
+            "symbol":"XAUUSD","direction":final_dir,"entry":live_for_entry,"sl":sl,"tp1":tp1,"dist":dist,"analysis_price":analysis_for_dir,"live_price":live_for_entry,
+            "confidence":conf,"market_analysis":market,"phase":market.get("phase",""),"phase_desc":market.get("phase_desc",""),
             "alert":market.get("alert",""),"alert_type":market.get("alert_type",""),"alert_desc":market.get("alert_desc",""),
-            "candle_patterns":market.get("candle_patterns",[]),"points_detail":market.get("points_detail",[]),
-            "probabilidad_nuevos_objetivos":{"prob_tp1_10usd_10_15min":p1,"prob_tp2_20usd_15min":p2,"prob_tp3_30usd_15min":p3},
-            "reason":market.get("reason",""),"pattern":market.get("pattern",""),"flip_reason":flip_reason,
-            "support":market.get("support",4052),"resistance":market.get("resistance",4073),"timestamp":datetime.now(EC_TZ).isoformat()
+            "points_detail":market.get("points_detail",[]),
+            "flip_reason":flip_reason,"support":market.get("support",4052),"resistance":market.get("resistance",4073),"timestamp":datetime.now(EC_TZ).isoformat()
         }
         return [signal]
     except Exception as e:
-        return [{"symbol":"XAUUSD","direction":"BUY","entry":get_gold_price(),"sl":0,"tp1":0,"tp2":0,"tp3":0,"sl_distance":0,"tp1_distance":0,"probability":50,"confidence":50,"probability_tp1":50,"win_rate":50,"win_rate_direction":50,"is_optimal_hour":False,"market_analysis":{"phase":"ERROR","alert":"ESPERA - ERROR","alert_type":"WAIT","points_detail":[],"candle_patterns":[],"smc_pats":[],"ag_bands":None,"support":4052,"resistance":4073,"band_long":21,"fib":None},"phase":"ERROR","alert":"ESPERA - ERROR","alert_type":"WAIT","candle_patterns":[],"points_detail":[],"probabilidad_nuevos_objetivos":{"prob_tp1_10usd_10_15min":50,"prob_tp2_20usd_15min":30,"prob_tp3_30usd_15min":15},"reason":"","pattern":"","flip_reason":str(e),"support":4052,"resistance":4073,"timestamp":datetime.now(EC_TZ).isoformat()}]
-
-@app.post("/trades/result")
-def save_result(r: TradeResult):
-    return {"ok":True}
-
-@app.get("/gold/analysis")
-def gold_analysis():
-    market=analyze_gold_pro(); price=get_gold_price(); rows=get_gold_history(50)
-    return {"symbol":"XAUUSD","current_price":price,"analysis_pro":market,"price_history_count":len(rows)}
+        return [{"symbol":"XAUUSD","direction":"ESPERA","entry":get_gold_price(),"sl":0,"tp1":0,"dist":0,"confidence":50,"market_analysis":{"phase":"ERROR","alert":"ESPERA - ERROR","alert_type":"WAIT","points_detail":[]},"phase":"ERROR","alert":"ESPERA - ERROR","alert_type":"WAIT","points_detail":[],"flip_reason":str(e),"timestamp":datetime.now(EC_TZ).isoformat()}]
 
 @app.on_event("startup")
 async def startup_event():
     seed_history_if_empty()
     async def monitor_loop():
-        print("Monitor ORO SCALPER DINÁMICO v8.6 iniciado")
+        print("Monitor ORO SCALPER PRECISIÓN v9.0 iniciado")
         while True:
             try: save_gold_history(get_gold_price())
             except: pass

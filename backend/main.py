@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 
-app = FastAPI(title="EdgeAlert ORO - FASES + PUNTOS + FIB + ANTIGRAVITY")
+app = FastAPI(title="EdgeAlert ORO - SCALPER DINÁMICO SMC")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 EC_TZ = timezone(timedelta(hours=-5))
@@ -123,9 +123,8 @@ def detect_candle_patterns(candles):
         pats.append({"name":"MARUBOZU BAJISTA","dir":"SELL","strength":2,"desc":"Marubozu bajista - fuerza venta"})
     return pats
 
-# --- NUEVAS FUNCIONES ANTIGRAVITY Y SMART MONEY ---
+# --- MOTOR ANTIGRAVITY & SMART MONEY ---
 def calc_antigravity_bands(prices, period=20, dev=2.5):
-    """Calcula Bandas de Desviación para detectar agotamiento del precio (Antigravity)"""
     if len(prices) < period: return None
     recent = prices[-period:]
     mean = sum(recent) / period
@@ -139,22 +138,15 @@ def calc_antigravity_bands(prices, period=20, dev=2.5):
     }
 
 def detect_smart_money(candles):
-    """Detecta FVG (Fair Value Gaps) y Order Blocks Institucionales"""
     if len(candles) < 3: return []
     smc_signals = []
-    
-    # Evaluar FVG (Vacíos de Liquidez) en las últimas 3 velas cerradas (o casi cerradas)
     c1, c2, c3 = candles[-3], candles[-2], candles[-1]
     
-    # FVG Alcista (Imbalance de compra)
     if c1["high"] < c3["low"] and c2["bullish"] and c2["strong"]:
         smc_signals.append({"name": "FVG ALCISTA", "dir": "BUY", "strength": 3, "desc": f"Vacío liquidez (SMC) entre {c1['high']:.2f} y {c3['low']:.2f}"})
-        
-    # FVG Bajista (Imbalance de venta)
     if c1["low"] > c3["high"] and not c2["bullish"] and c2["strong"]:
         smc_signals.append({"name": "FVG BAJISTA", "dir": "SELL", "strength": 3, "desc": f"Vacío liquidez (SMC) entre {c3['high']:.2f} y {c1['low']:.2f}"})
 
-    # Order Block (Última vela contraria antes del movimiento fuerte)
     if c2["strong"] and c2["bullish"] and not c1["bullish"]:
         smc_signals.append({"name": "ORDER BLOCK ALCISTA", "dir": "BUY", "strength": 2, "desc": f"Bloque de órdenes en {c1['low']:.2f}"})
     if c2["strong"] and not c2["bullish"] and c1["bullish"]:
@@ -168,11 +160,9 @@ def get_long_sr(rows, lookback_hours=4):
         lookback = lookback_hours * 120
         prices = [r[0] for r in rows[-lookback:]] if len(rows)>=lookback else [r[0] for r in rows]
         if len(prices)<60: return None
-        pivot_highs = []
-        pivot_lows = []
+        pivot_highs, pivot_lows = [], []
         for i in range(5, len(prices)-5):
-            is_high = True
-            is_low = True
+            is_high, is_low = True, True
             for j in range(1,4):
                 if prices[i] <= prices[i-j] or prices[i] <= prices[i+j]: is_high = False
                 if prices[i] >= prices[i-j] or prices[i] >= prices[i+j]: is_low = False
@@ -187,8 +177,7 @@ def get_long_sr(rows, lookback_hours=4):
             for l in levels_sorted[1:]:
                 if abs(l - sum(clusters[-1])/len(clusters[-1])) < tolerance: clusters[-1].append(l)
                 else: clusters.append([l])
-            result = []
-            for c in clusters: result.append((sum(c)/len(c), len(c)))
+            result = [(sum(c)/len(c), len(c)) for c in clusters]
             result.sort(key=lambda x: x[1], reverse=True)
             return result
         high_clusters = cluster_levels(pivot_highs, 1.5)
@@ -204,7 +193,7 @@ def get_long_sr(rows, lookback_hours=4):
             "resistance_far": recent_high, "support_far": recent_low, "high_clusters": high_clusters[:3],
             "low_clusters": low_clusters[:3], "band_long": band_long, "is_acc_long": band_long < 12.0, "lookback": lookback
         }
-    except Exception as e: return None
+    except Exception: return None
 
 def calc_fibonacci_impulse(rows):
     try:
@@ -307,7 +296,6 @@ def analyze_gold_pro():
         
         closed_10, forming_10 = get_closed_candles(candles_10)
         closed_15, forming_15 = get_closed_candles(candles_15)
-        closed_30, forming_30 = get_closed_candles(candles_30)
         
         if closed_15 and len(closed_15)>=1: analysis_price = closed_15[-1]["close"]
         elif closed_10 and len(closed_10)>=1: analysis_price = closed_10[-1]["close"]
@@ -320,10 +308,8 @@ def analyze_gold_pro():
         sma15 = sum(prices[-15:])/15 if len(prices)>=15 else current_price
         sma30 = sum(prices[-30:])/30 if len(prices)>=30 else current_price
         
-        # --- CÁLCULOS ANTIGRAVITY Y SMART MONEY ---
         ag_bands = calc_antigravity_bands(prices, period=20, dev=2.5)
         smc_pats = detect_smart_money(candles_15) + detect_smart_money(candles_10)
-        # ------------------------------------------
 
         recent_prices = prices[-31:-1] if len(prices)>=31 else prices[:-1]
         high_recent = max(recent_prices) if recent_prices else current_price+3
@@ -377,10 +363,10 @@ def analyze_gold_pro():
         if ag_bands:
             if current_price >= ag_bands["upper"]:
                 sell_score += 4
-                points_detail.append({"side": "SELL", "points": 4, "name": "ANTIGRAVITY SELL", "reason": f"Precio {current_price:.2f} rompió banda superior {ag_bands['upper']:.2f} (+2.5 SD). Probable reversión bajista."})
+                points_detail.append({"side": "SELL", "points": 4, "name": "ANTIGRAVITY SELL", "reason": f"Precio rompió banda superior (+2.5 SD)."})
             elif current_price <= ag_bands["lower"]:
                 buy_score += 4
-                points_detail.append({"side": "BUY", "points": 4, "name": "ANTIGRAVITY BUY", "reason": f"Precio {current_price:.2f} rompió banda inferior {ag_bands['lower']:.2f} (-2.5 SD). Probable reversión alcista."})
+                points_detail.append({"side": "BUY", "points": 4, "name": "ANTIGRAVITY BUY", "reason": f"Precio rompió banda inferior (-2.5 SD)."})
 
         # --- PUNTUACIÓN SMART MONEY (FVG/OB) ---
         for pat in smc_pats:
@@ -512,7 +498,7 @@ def analyze_gold_pro():
             "pattern":phase_info["phase"],"phase":phase_info["phase"],"phase_desc":phase_info["desc"],
             "phase_info":phase_info,"alert":alert,"alert_type":alert_type,"alert_desc":alert_desc,
             "candle_patterns":candle_pats,"points_detail":points_detail,
-            "ag_bands": ag_bands, "smc_pats": smc_pats, # ENVIADOS AL FRONTEND
+            "ag_bands": ag_bands, "smc_pats": smc_pats, 
             "analysis_price":analysis_price,"live_price":real_current_price,
             "reason":" | ".join([p["name"] for p in points_detail[:3]]),
             "high_10":high_10,"low_10":low_10,"high_15":high_15,"low_15":low_15,"high_30":high_30,"low_30":low_30,
@@ -563,168 +549,4 @@ def should_flip(new_dir, conf, market):
         if row and row[0]:
             try:
                 last_time=datetime.fromisoformat(row[0])
-                mins_passed=(datetime.now(EC_TZ)-last_time).total_seconds()/60
-            except: mins_passed = 999
-        if (buy_score==0 and sell_score>=2 and new_dir=="SELL") or (sell_score==0 and buy_score>=2 and new_dir=="BUY"):
-            return True, f"Reversa clara {buy_score}B/{sell_score}S - cambia inmediato a {new_dir}"
-        if "BAJISTA" in phase and new_dir=="SELL" and last["direction"]=="BUY" and sma30_slope < -0.3:
-            return True, f"Tendencia mayor 4H bajista confirma SELL tras {mins_passed:.1f}m"
-        if "ALCISTA" in phase and new_dir=="BUY" and last["direction"]=="SELL" and sma30_slope > 0.3:
-            return True, f"Tendencia mayor 4H alcista confirma BUY tras {mins_passed:.1f}m"
-        if "EXPANSION" in phase and conf>=70 and diff>=2:
-            return True, f"Expansión {phase} - cambio a {new_dir}"
-        if mins_passed < 3:
-            if diff <=1 and buy_score>0 and sell_score>0: return False, f"Oscilación vela formándose - van {mins_passed:.1f}m"
-        if mins_passed < 15:
-            if conf>=66 and diff>=2: return True, f"Cambio tras {mins_passed:.1f}m a {new_dir} - conf {conf}% diff {diff}"
-            return False, f"Señal estable 15m - van {mins_passed:.1f}m - mantiene {last['direction']}"
-        if diff>=2 and conf>=66: return True, f"Cambio confirmado tras {mins_passed:.1f}m"
-        if mins_passed>=15 and conf>=66: return True, f"Cambio tras {mins_passed:.1f}m a {new_dir}"
-        return False, f"Confianza {conf}% insuficiente para {new_dir} - mantiene {last['direction']}"
-    except Exception as e: return True, f"Error {e} - permite cambio"
-
-def get_stats():
-    try:
-        conn=sqlite3.connect(DB_PATH); c=conn.cursor()
-        c.execute("SELECT wins,loss,buy_wins,buy_total,sell_wins,sell_total FROM gold_learning WHERE id=1")
-        row=c.fetchone(); conn.close()
-        if row: return {"wins":row[0],"loss":row[1],"buy_wins":row[2],"buy_total":row[3],"sell_wins":row[4],"sell_total":row[5]}
-    except: pass
-    return {"wins":18,"loss":6,"buy_wins":11,"buy_total":14,"sell_wins":7,"sell_total":10}
-
-def calc_success_rate(direction):
-    try:
-        conn=sqlite3.connect(DB_PATH); c=conn.cursor()
-        c.execute("SELECT wins,loss FROM gold_learning WHERE id=1")
-        row=c.fetchone(); conn.close()
-        total=row[0]+row[1] if row else 24
-        wr=row[0]/total*100 if total>0 else 75
-        return wr,72,50,35
-    except: return 72,72,50,35
-
-def calc_prob(hour, market):
-    try:
-        stats=get_stats(); direction=market.get("direction","BUY")
-        if direction=="BUY":
-            bt=stats.get("buy_total",1); bw=stats.get("buy_wins",0); wr_dir=(bw/bt*100) if bt>0 else 75
-        else:
-            st=stats.get("sell_total",1); sw=stats.get("sell_wins",0); wr_dir=(sw/st*100) if st>0 else 70
-        total=stats["wins"]+stats["loss"]; wr_glob=(stats["wins"]/total*100) if total>0 else 72
-        po,p1,p2,p3=calc_success_rate(direction)
-        conf=market.get("confidence",65)
-        phase_bonus=10 if "EXPANSION" in market.get("phase","") else 5 if "TENDENCIA" in market.get("phase","") else -8 if "ACUMULACION" in market.get("phase","") else 0
-        candle_bonus=min(len(market.get("candle_patterns",[]))*3,9)
-        hour_bonus=12 if 8<=hour<=10 else 6 if 7<=hour<=12 else 3 if 13<=hour<=15 else 0
-        vol=market.get("volatility",0); vol_bonus=5 if vol>=3 else -5 if vol<1.5 else 0
-        prob=(wr_dir*0.30)+(po*0.30)+(conf*0.20)+hour_bonus+vol_bonus+phase_bonus+candle_bonus
-        prob=max(50,min(95,prob))
-        return round(prob,1),stats,p1,p2,p3,wr_dir,wr_glob
-    except: return 72,get_stats(),72,50,35,70,72
-
-def calc_tp_sl(price, direction):
-    d=6.17
-    if direction=="BUY": return price-d, price+d, price+d*2, price+d*3, d, d, d*2, d*3
-    else: return price+d, price-d, price-d*2, price-d*3, d, d, d*2, d*3
-
-def update_stats(result, direction):
-    try:
-        conn=sqlite3.connect(DB_PATH); c=conn.cursor()
-        if result=="TP1" or result=="TP2" or result=="TP3":
-            c.execute("UPDATE gold_learning SET wins=wins+1, total_trades=total_trades+1 WHERE id=1")
-            if direction=="BUY": c.execute("UPDATE gold_learning SET buy_wins=buy_wins+1, buy_total=buy_total+1 WHERE id=1")
-            else: c.execute("UPDATE gold_learning SET sell_wins=sell_wins+1, sell_total=sell_total+1 WHERE id=1")
-        else:
-            c.execute("UPDATE gold_learning SET loss=loss+1, total_trades=total_trades+1 WHERE id=1")
-            if direction=="BUY": c.execute("UPDATE gold_learning SET buy_total=buy_total+1 WHERE id=1")
-            else: c.execute("UPDATE gold_learning SET sell_total=sell_total+1 WHERE id=1")
-        conn.commit(); conn.close()
-    except: pass
-
-@app.get("/")
-def root(): return {"message":"ORO FASES + PUNTOS + FIB + ANTIGRAVITY","version":"8.5"}
-
-@app.get("/health")
-def health():
-    conn=sqlite3.connect(DB_PATH); c=conn.cursor()
-    c.execute("SELECT COUNT(*) FROM price_history"); count=c.fetchone()[0]; conn.close()
-    return {"status":"ok","symbol":"XAUUSD","history":count,"version":"8.5"}
-
-@app.get("/signals/live")
-def signals_live():
-    try:
-        price=get_gold_price(); save_gold_history(price)
-        market=analyze_gold_pro()
-        new_dir=market.get("direction","BUY"); conf=market.get("confidence",65)
-        should, flip_reason=should_flip(new_dir, conf, market)
-        if should:
-            final_dir=new_dir; update_last_signal(final_dir, market.get("phase",""))
-        else:
-            last=get_last_signal(); final_dir=last["direction"]
-        hour=datetime.now(EC_TZ).hour
-        market_for_prob = dict(market)
-        market_for_prob['direction'] = final_dir
-        prob,stats,p1,p2,p3,wr_dir,wr_glob=calc_prob(hour, market_for_prob)
-        display_prob = market.get('confidence', prob) if market.get('alert_type')=='ENTER' else prob
-        live_for_entry = market.get("live_price", price)
-        analysis_for_dir = market.get("analysis_price", price)
-        sl,tp1,tp2,tp3,sl_d,tp1_d,tp2_d,tp3_d=calc_tp_sl(live_for_entry, final_dir)
-        if final_dir=="BUY":
-            sl_exp=f"SL {sl:.2f} ABAJO (si baja {sl_d:.2f} pierdes $10)"; tp_exp=f"TP1 {tp1:.2f} ARRIBA (si sube {tp1_d:.2f} ganas $10) COMPRA"
-        else:
-            sl_exp=f"SL {sl:.2f} ARRIBA (si sube {sl_d:.2f} pierdes $10)"; tp_exp=f"TP1 {tp1:.2f} ABAJO (si baja {tp1_d:.2f} ganas $10) VENTA"
-        market['direction'] = final_dir
-        if final_dir != new_dir:
-            market['alert'] = f"ESPERA - MANTENIENDO {final_dir} - señal {new_dir} en espera ({flip_reason})"
-            market['alert_type'] = "WAIT"
-            market['alert_desc'] = f"Score {market.get('buy_score')}B/{market.get('sell_score')}S quiere {new_dir} pero mantiene {final_dir}"
-        market['confidence'] = market.get('confidence', conf)
-        
-        signal={
-            "symbol":"XAUUSD","direction":final_dir,"entry":live_for_entry,"sl":sl,"tp1":tp1,"tp2":tp2,"tp3":tp3,"sl_distance":sl_d,"tp1_distance":tp1_d,"analysis_price":analysis_for_dir,"live_price":live_for_entry,
-            "probability":display_prob,"confidence":conf,"probability_tp1":prob,"win_rate":wr_glob,"win_rate_direction":wr_dir,
-            "win_rate_buy":round(stats.get("buy_wins",0)/max(stats.get("buy_total",1),1)*100,1),
-            "win_rate_sell":round(stats.get("sell_wins",0)/max(stats.get("sell_total",1),1)*100,1),
-            "is_optimal_hour":8<=hour<=10,"market_analysis":market,"phase":market.get("phase",""),"phase_desc":market.get("phase_desc",""),
-            "alert":market.get("alert",""),"alert_type":market.get("alert_type",""),"alert_desc":market.get("alert_desc",""),
-            "candle_patterns":market.get("candle_patterns",[]),"points_detail":market.get("points_detail",[]),
-            "probabilidad_nuevos_objetivos":{"prob_tp1_10usd_10_15min":p1,"prob_tp2_20usd_15min":p2,"prob_tp3_30usd_15min":p3},
-            "sl_explain":sl_exp,"tp_explain":tp_exp,"reason":market.get("reason",""),"pattern":market.get("pattern",""),"flip_reason":flip_reason,
-            "support":market.get("support",4052),"resistance":market.get("resistance",4073),"timestamp":datetime.now(EC_TZ).isoformat()
-        }
-        return [signal]
-    except Exception as e:
-        print(e)
-        return [{"symbol":"XAUUSD","direction":"BUY","entry":get_gold_price(),"sl":get_gold_price()-6.17,"tp1":get_gold_price()+6.17,"tp2":get_gold_price()+12.34,"tp3":get_gold_price()+18.51,"sl_distance":6.17,"tp1_distance":6.17,"probability":55,"confidence":55,"probability_tp1":50,"win_rate":72,"win_rate_direction":70,"win_rate_buy":75,"win_rate_sell":70,"is_optimal_hour":False,"market_analysis":{"phase":"ERROR","alert":"ESPERA - ERROR","alert_type":"WAIT","points_detail":[],"candle_patterns":[],"smc_pats":[],"ag_bands":None,"support":4052,"resistance":4073,"band_long":21,"fib":None},"phase":"ERROR","alert":"ESPERA - ERROR","alert_type":"WAIT","candle_patterns":[],"points_detail":[],"probabilidad_nuevos_objetivos":{"prob_tp1_10usd_10_15min":50,"prob_tp2_20usd_15min":30,"prob_tp3_30usd_15min":15},"sl_explain":"","tp_explain":"","reason":"","pattern":"","flip_reason":str(e),"support":4052,"resistance":4073,"timestamp":datetime.now(EC_TZ).isoformat()}]
-
-@app.get("/trades/active")
-def get_active():
-    conn=sqlite3.connect(DB_PATH); c=conn.cursor()
-    c.execute("SELECT id,direction,entry,sl,tp1,tp2,tp3,probability,status,created_at FROM active_trades WHERE status='OPEN' ORDER BY id DESC")
-    rows=c.fetchall(); conn.close()
-    return [{"id":r[0],"symbol":"XAUUSD","direction":r[1],"entry":r[2],"sl":r[3],"tp1":r[4],"tp2":r[5],"tp3":r[6],"probability":r[7],"status":r[8],"created_at":r[9]} for r in rows]
-
-@app.post("/trades/result")
-def save_result(r: TradeResult):
-    conn=sqlite3.connect(DB_PATH); c=conn.cursor()
-    c.execute("SELECT direction FROM active_trades WHERE status='OPEN' ORDER BY id DESC LIMIT 1")
-    row=c.fetchone(); direction=row[0] if row else "BUY"; conn.close()
-    update_stats(r.result, direction)
-    conn=sqlite3.connect(DB_PATH); c=conn.cursor()
-    c.execute("UPDATE active_trades SET status=? WHERE status='OPEN'", (f"{r.result}_MANUAL",)); conn.commit(); conn.close()
-    return {"ok":True}
-
-@app.get("/gold/analysis")
-def gold_analysis():
-    market=analyze_gold_pro(); price=get_gold_price(); rows=get_gold_history(50)
-    return {"symbol":"XAUUSD","current_price":price,"analysis_pro":market,"price_history_count":len(rows)}
-
-@app.on_event("startup")
-async def startup_event():
-    seed_history_if_empty()
-    async def monitor_loop():
-        print("Monitor ORO v8.5 Antigravity iniciado")
-        while True:
-            try: save_gold_history(get_gold_price())
-            except: pass
-            await asyncio.sleep(30)
-    asyncio.create_task(monitor_loop())
+                mins_passed=(datetime.now(EC_TZ)-last_time).total_

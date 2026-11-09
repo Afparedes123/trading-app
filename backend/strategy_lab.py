@@ -282,18 +282,18 @@ class TrendSpiderStrategyLab:
         X_sell_norm = scaler_sell.fit_transform(X_sell)
         latest_X_sell = scaler_sell.transform(X_all[-1:])
 
-        # Modelos ligeros de alto rendimiento para computación rápida
+        # Modelos de Clasificación exactos de v15.5 con caché
         models_buy = {
-            "Logistic": LogisticRegression(max_iter=150, C=1.0),
+            "Logistic": LogisticRegression(max_iter=300, C=1.0),
             "NaiveBayes": GaussianNB(),
-            "KNN": KNeighborsClassifier(n_neighbors=min(5, len(y_buy) // 2)),
-            "RandomForest": RandomForestClassifier(n_estimators=15, max_depth=3, random_state=42)
+            "KNN": KNeighborsClassifier(n_neighbors=min(7, len(y_buy) // 2)),
+            "RandomForest": RandomForestClassifier(n_estimators=30, max_depth=4, random_state=42)
         }
         models_sell = {
-            "Logistic": LogisticRegression(max_iter=150, C=1.0),
+            "Logistic": LogisticRegression(max_iter=300, C=1.0),
             "NaiveBayes": GaussianNB(),
-            "KNN": KNeighborsClassifier(n_neighbors=min(5, len(y_sell) // 2)),
-            "RandomForest": RandomForestClassifier(n_estimators=15, max_depth=3, random_state=42)
+            "KNN": KNeighborsClassifier(n_neighbors=min(7, len(y_sell) // 2)),
+            "RandomForest": RandomForestClassifier(n_estimators=30, max_depth=4, random_state=42)
         }
 
         buy_probs = {}

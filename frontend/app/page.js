@@ -119,8 +119,8 @@ export default function TrendSpiderPage() {
 
   // AI Strategy Lab
   const [aiModel, setAiModel] = useState("Ensemble");
-  const [tpPct, setTpPct] = useState(0.12);
-  const [slPct, setSlPct] = useState(0.08);
+  const [tpPct, setTpPct] = useState(0.10);
+  const [slPct, setSlPct] = useState(0.06);
   const [horizon, setHorizon] = useState(30);
 
   // Pestaña visual activa

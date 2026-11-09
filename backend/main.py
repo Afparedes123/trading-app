@@ -725,15 +725,14 @@ def analyze_market_trendspider(
     current_tp2 = last_sig["tp2_price"]
     max_fav = last_sig["max_favorable_price"] if last_sig["max_favorable_price"] > 1000 else entry_p
 
-    # Calcular SL real en M5: detrás del último Swing Low/High M5 + colchón de $1.20 (entre $3.50 y $5.20 de margen)
-    # Así una mecha de re-testeo en 1 minuto jamás te saca antes de que suba.
-    buy_swing_sl = round(m5_swing.get("last_sl", live_price - 3.8) - 1.20, 2)
-    sell_swing_sl = round(m5_swing.get("last_sh", live_price + 3.8) + 1.20, 2)
+    # Calcular SL real en M5: detrás del último Swing Low/High M5 con colchón de seguridad
+    buy_swing_sl = round(m5_swing.get("last_sl", live_price - 4.5) - 1.50, 2)
+    sell_swing_sl = round(m5_swing.get("last_sh", live_price + 4.5) + 1.50, 2)
 
-    sl_dist_buy = round(max(3.50, min(abs(live_price - buy_swing_sl), 5.20)), 2)
-    sl_dist_sell = round(max(3.50, min(abs(sell_swing_sl - live_price), 5.20)), 2)
-    tp1_distance = round(max(4.80, min(effective_atr * 2.0, 8.50)), 2)
-    tp2_distance = round(max(8.00, min(effective_atr * 3.5, 14.0)), 2)
+    sl_dist_buy = round(max(4.50, min(abs(live_price - buy_swing_sl), 6.50)), 2)
+    sl_dist_sell = round(max(4.50, min(abs(sell_swing_sl - live_price), 6.50)), 2)
+    tp1_distance = round(max(5.50, min(effective_atr * 2.2, 9.50)), 2)
+    tp2_distance = round(max(9.00, min(effective_atr * 3.5, 15.0)), 2)
 
     final_dir = "ESPERA"
     alert_text = "⏸ ESPERANDO CONFIRMACIÓN ESTRUCTURAL M5"
@@ -749,9 +748,11 @@ def analyze_market_trendspider(
             max_fav = live_price
             update_last_signal("COMPRA", "HOLD_COMPRA", entry_p, current_sl, current_tp1, current_tp2, max_fav)
 
-        # A. Si la estructura rompe a la baja tras acumular 3 velas (SELL_BREAKDOWN) -> GIRAR INMEDIATAMENTE A VENTA
-        if m5_sig == "SELL_BREAKDOWN" or (sell_points >= 6 and sell_points >= buy_points + 3) or (live_price <= current_sl and current_sl > 1000):
-            # Si hay ruptura bajista clara de acumulación, no solo cerramos compra sino que activamos alerta de salida inmediata / giro a venta
+        # A. Si la estructura rompe a la baja (SELL_BREAKDOWN), o toca SL, o cae más de $5.50 (CORTACIRCUITOS DE EMERGENCIA)
+        emergency_sl_triggered = (entry_p - live_price >= 5.50 and entry_p > 1000)
+        sl_hit = (live_price <= current_sl and current_sl > 1000)
+
+        if m5_sig == "SELL_BREAKDOWN" or (sell_points >= 6 and sell_points >= buy_points + 3) or sl_hit or emergency_sl_triggered:
             new_sl = round(live_price + sl_dist_sell, 2)
             new_tp1 = round(live_price - tp1_distance, 2)
             new_tp2 = round(live_price - tp2_distance, 2)
@@ -774,20 +775,21 @@ def analyze_market_trendspider(
                     m5_swing=m5_swing
                 )
             else:
-                update_last_signal("ESPERA", "SL_COMPRA_EXECUTED", 0, 0, 0, 0, 0)
-                log_signal_event("EXIT", "COMPRA", live_price, current_sl, current_tp1, pnl, f"Stop Loss / Salida de protección COMPRA ({pnl:+.2f} USD)")
+                update_last_signal("ESPERA", "SL_COMPRA_EXECUTED", entry_p, 0, 0, 0, 0)
+                reason_sl = "Cortacircuitos de protección (-$5.50)" if emergency_sl_triggered else f"Perforó soporte de seguridad (${current_sl:.2f})"
+                log_signal_event("EXIT", "COMPRA", live_price, current_sl, current_tp1, pnl, f"Stop Loss COMPRA ({pnl:+.2f} USD) - {reason_sl}")
                 return build_response(
                     direction="ESPERA", confidence=90,
-                    alert=f"🛑 SALIR DE COMPRA AHORA ({pnl:+.2f} USD)",
+                    alert=f"🛑 SALIR DE COMPRA INMEDIATAMENTE ({pnl:+.2f} USD)",
                     alert_type="EXIT",
-                    alert_desc=f"El precio perforó el soporte de seguridad (${current_sl:.2f}). Cierra la compra inmediatamente.",
+                    alert_desc=f"Atención: {reason_sl}. Cierra la compra para proteger tu capital.",
                     entry_p=entry_p, sl=current_sl, tp1=current_tp1, tp2=current_tp2,
                     live_price=live_price, feed_source=feed_source, atr=effective_atr,
                     confluences=confluences_audit, trendlines_data=trendlines_data,
                     fib_data=fib_data, heatmap_data=heatmap_data, ai_data=ai_strategy_data,
                     candles=candles_1m, is_locked=is_locked, lock_ts=truth_lock_ts,
                     support=support_val, resistance=resistance_val, room_up=room_up, room_down=room_down,
-                    buy_score=buy_points, sell_score=sell_points, flip_reason="Soporte roto",
+                    buy_score=buy_points, sell_score=sell_points, flip_reason="Stop de protección ejecutado",
                     m5_swing=m5_swing
                 )
 
@@ -830,8 +832,11 @@ def analyze_market_trendspider(
             max_fav = live_price
             update_last_signal("VENTA", "HOLD_VENTA", entry_p, current_sl, current_tp1, current_tp2, max_fav)
 
-        # A. Si rompe al alza con fuerza (BUY_BREAKOUT) -> GIRAR A COMPRA O SALIR DE VENTA
-        if m5_sig == "BUY_BREAKOUT" or (buy_points >= 6 and buy_points >= sell_points + 3) or (live_price >= current_sl and current_sl > 1000):
+        # A. Si rompe al alza con fuerza (BUY_BREAKOUT), o toca SL, o cae más de $5.50 (CORTACIRCUITOS DE EMERGENCIA)
+        emergency_sl_triggered = (live_price - entry_p >= 5.50 and entry_p > 1000)
+        sl_hit = (live_price >= current_sl and current_sl > 1000)
+
+        if m5_sig == "BUY_BREAKOUT" or (buy_points >= 6 and buy_points >= sell_points + 3) or sl_hit or emergency_sl_triggered:
             new_sl = round(live_price - sl_dist_buy, 2)
             new_tp1 = round(live_price + tp1_distance, 2)
             new_tp2 = round(live_price + tp2_distance, 2)
@@ -854,20 +859,21 @@ def analyze_market_trendspider(
                     m5_swing=m5_swing
                 )
             else:
-                update_last_signal("ESPERA", "SL_VENTA_EXECUTED", 0, 0, 0, 0, 0)
-                log_signal_event("EXIT", "VENTA", live_price, current_sl, current_tp1, pnl, f"Stop Loss / Salida de protección VENTA ({pnl:+.2f} USD)")
+                update_last_signal("ESPERA", "SL_VENTA_EXECUTED", entry_p, 0, 0, 0, 0)
+                reason_sl = "Cortacircuitos de protección (-$5.50)" if emergency_sl_triggered else f"Superó resistencia de seguridad (${current_sl:.2f})"
+                log_signal_event("EXIT", "VENTA", live_price, current_sl, current_tp1, pnl, f"Stop Loss VENTA ({pnl:+.2f} USD) - {reason_sl}")
                 return build_response(
                     direction="ESPERA", confidence=90,
-                    alert=f"🛑 SALIR DE VENTA AHORA ({pnl:+.2f} USD)",
+                    alert=f"🛑 SALIR DE VENTA INMEDIATAMENTE ({pnl:+.2f} USD)",
                     alert_type="EXIT",
-                    alert_desc=f"El precio superó la resistencia de seguridad (${current_sl:.2f}). Cierra la venta inmediatamente.",
+                    alert_desc=f"Atención: {reason_sl}. Cierra la venta para proteger tu capital.",
                     entry_p=entry_p, sl=current_sl, tp1=current_tp1, tp2=current_tp2,
                     live_price=live_price, feed_source=feed_source, atr=effective_atr,
                     confluences=confluences_audit, trendlines_data=trendlines_data,
                     fib_data=fib_data, heatmap_data=heatmap_data, ai_data=ai_strategy_data,
                     candles=candles_1m, is_locked=is_locked, lock_ts=truth_lock_ts,
                     support=support_val, resistance=resistance_val, room_up=room_up, room_down=room_down,
-                    buy_score=buy_points, sell_score=sell_points, flip_reason="Resistencia rota",
+                    buy_score=buy_points, sell_score=sell_points, flip_reason="Stop de protección ejecutado",
                     m5_swing=m5_swing
                 )
 
@@ -901,9 +907,16 @@ def analyze_market_trendspider(
         flip_reason = f"En VENTA ({pnl:+.2f} USD)"
         confidence_score = 86
 
-    # 3. Disparo de NUEVA Entrada desde ESPERA
+    # 3. Disparo de NUEVA Entrada desde ESPERA (con Filtro Anti-Whipsaw tras SL)
     else:
-        if buy_points >= 5 and buy_points >= sell_points + 3:
+        last_phase = last_sig.get("phase", "")
+        last_stopped_entry = last_sig.get("entry_price", 0.0)
+
+        # Filtro Anti-Barrido: Si acabamos de ser detenidos por SL en COMPRA, requerir confirmación superior o precio más alto
+        buy_cooldown_active = (last_phase == "SL_COMPRA_EXECUTED" and live_price <= last_stopped_entry + 1.20 and buy_points < 7)
+        sell_cooldown_active = (last_phase == "SL_VENTA_EXECUTED" and live_price >= last_stopped_entry - 1.20 and sell_points < 7)
+
+        if buy_points >= 5 and buy_points >= sell_points + 3 and not buy_cooldown_active:
             final_dir = "COMPRA"
             entry_p = live_price
             current_sl = round(live_price - sl_dist_buy, 2)
@@ -917,7 +930,7 @@ def analyze_market_trendspider(
             update_last_signal("COMPRA", "NEW_ENTRY", entry_p, current_sl, current_tp1, current_tp2, entry_p)
             log_signal_event("ENTER", "COMPRA", entry_p, current_sl, current_tp1, 0.0, m5_swing["structure"] + ": " + m5_swing["reason"])
 
-        elif sell_points >= 5 and sell_points >= buy_points + 3:
+        elif sell_points >= 5 and sell_points >= buy_points + 3 and not sell_cooldown_active:
             final_dir = "VENTA"
             entry_p = live_price
             current_sl = round(live_price + sl_dist_sell, 2)
@@ -934,9 +947,10 @@ def analyze_market_trendspider(
         else:
             final_dir = "ESPERA"
             confidence_score = 55
+            waiting_reason = "Filtro anti-barrido activo (esperando confirmación estructural)" if (buy_cooldown_active or sell_cooldown_active) else m5_swing['reason']
             alert_text = f"⏸ ESPERA • {m5_swing['structure']}"
             alert_type = "WAIT"
-            alert_desc = f"{m5_swing['reason']} (Compra {buy_points} pts / Venta {sell_points} pts)."
+            alert_desc = f"{waiting_reason} (Compra {buy_points} pts / Venta {sell_points} pts)."
             flip_reason = "Esperando ruptura o confirmación de giro M5"
 
     return build_response(
@@ -1126,12 +1140,12 @@ async def startup_event():
         while True:
             try:
                 p, _ = get_live_spot_price()
-                update_current_1m_candle(p, "FEED")
-                analyze_market_trendspider()
+                if p > 1000:
+                    update_current_1m_candle(p, "FEED")
                 ticks += 1
                 if ticks % 30 == 0:
                     sync_historical_1m_candles()
             except Exception as e:
                 print(f"Monitor loop error: {e}")
-            await asyncio.sleep(6)
+            await asyncio.sleep(4)
     asyncio.create_task(monitor_loop())

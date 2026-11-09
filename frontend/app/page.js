@@ -4,14 +4,31 @@ import React, { useEffect, useState, useRef } from "react";
 const DEFAULT_API = process.env.NEXT_PUBLIC_API_URL || "https://trading-app-jn5a.onrender.com";
 
 // ==============================================================================
-// MOTOR DE AUDIO SINTETIZADO (WEB AUDIO API + VOZ EN ESPAÑOL)
+// MOTOR DE AUDIO SINTETIZADO (WEB AUDIO API + VOZ EN ESPAÑOL + TOUCH UNLOCK)
 // ==============================================================================
+let globalAudioCtx = null;
+
+function getAudioContext() {
+  if (typeof window === "undefined") return null;
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  if (!AudioCtx) return null;
+  if (!globalAudioCtx) {
+    globalAudioCtx = new AudioCtx();
+  }
+  if (globalAudioCtx.state === "suspended") {
+    globalAudioCtx.resume().catch(() => {});
+  }
+  return globalAudioCtx;
+}
+
 function playAlertSound(type = "BUY", voiceMessage = "") {
   if (typeof window === "undefined") return;
   try {
-    const AudioCtx = window.AudioContext || window.webkitAudioContext;
-    if (AudioCtx) {
-      const ctx = new AudioCtx();
+    const ctx = getAudioContext();
+    if (ctx) {
+      if (ctx.state === "suspended") {
+        ctx.resume().catch(() => {});
+      }
       const now = ctx.currentTime;
 
       const makeTone = (freq, start, duration, wave = "sine", gainVal = 0.25) => {
@@ -27,29 +44,30 @@ function playAlertSound(type = "BUY", voiceMessage = "") {
         osc.stop(start + duration);
       };
 
-      if (type === "BUY") {
-        // Acorde ascendente institucional de Compra
-        makeTone(523.25, now, 0.16, "triangle", 0.3);       // C5
-        makeTone(659.25, now + 0.14, 0.16, "triangle", 0.3); // E5
-        makeTone(783.99, now + 0.28, 0.22, "triangle", 0.3); // G5
-        makeTone(1046.5, now + 0.44, 0.45, "sine", 0.35);    // C6
-      } else if (type === "SELL") {
-        // Acorde descendente firme de Venta
-        makeTone(880.0, now, 0.16, "sawtooth", 0.25);        // A5
-        makeTone(698.46, now + 0.15, 0.16, "sawtooth", 0.25);// F5
-        makeTone(587.33, now + 0.30, 0.18, "sawtooth", 0.25);// D5
-        makeTone(440.0, now + 0.46, 0.45, "triangle", 0.3);  // A4
+      if (type === "EXIT") {
+        // Alarma urgente de salida / protección (sirena doble de alta prioridad)
+        makeTone(440.0, now, 0.16, "sawtooth", 0.4);
+        makeTone(330.0, now + 0.14, 0.16, "sawtooth", 0.4);
+        makeTone(440.0, now + 0.30, 0.20, "sawtooth", 0.45);
+        makeTone(260.0, now + 0.50, 0.45, "sawtooth", 0.45);
       } else if (type === "TAKE_PROFIT") {
         // Fanfarria dorada de Take Profit / Ganancia
-        makeTone(587.33, now, 0.12, "sine", 0.3);
-        makeTone(783.99, now + 0.12, 0.12, "sine", 0.3);
-        makeTone(987.77, now + 0.24, 0.15, "sine", 0.3);
-        makeTone(1174.66, now + 0.38, 0.55, "triangle", 0.35);
-      } else if (type === "EXIT") {
-        // Doble alarma urgente de Salida / Protección
-        makeTone(320.0, now, 0.22, "sawtooth", 0.35);
-        makeTone(260.0, now + 0.25, 0.22, "sawtooth", 0.35);
-        makeTone(320.0, now + 0.50, 0.35, "sawtooth", 0.35);
+        makeTone(587.33, now, 0.12, "sine", 0.35);
+        makeTone(783.99, now + 0.12, 0.12, "sine", 0.35);
+        makeTone(987.77, now + 0.24, 0.15, "sine", 0.35);
+        makeTone(1174.66, now + 0.38, 0.55, "triangle", 0.4);
+      } else if (type === "BUY") {
+        // Acorde ascendente de Compra
+        makeTone(523.25, now, 0.16, "triangle", 0.3);
+        makeTone(659.25, now + 0.14, 0.16, "triangle", 0.3);
+        makeTone(783.99, now + 0.28, 0.22, "triangle", 0.3);
+        makeTone(1046.5, now + 0.44, 0.45, "sine", 0.35);
+      } else if (type === "SELL") {
+        // Acorde descendente de Venta
+        makeTone(880.0, now, 0.16, "sawtooth", 0.25);
+        makeTone(698.46, now + 0.15, 0.16, "sawtooth", 0.25);
+        makeTone(587.33, now + 0.30, 0.18, "sawtooth", 0.25);
+        makeTone(440.0, now + 0.46, 0.45, "triangle", 0.3);
       }
     }
 
@@ -62,7 +80,7 @@ function playAlertSound(type = "BUY", voiceMessage = "") {
       utterance.pitch = 1.0;
       setTimeout(() => {
         window.speechSynthesis.speak(utterance);
-      }, 650);
+      }, 500);
     }
   } catch (err) {
     console.warn("Audio warning:", err);
@@ -70,10 +88,20 @@ function playAlertSound(type = "BUY", voiceMessage = "") {
 }
 
 export default function TrendSpiderPage() {
-  const [signal, setSignal] = useState(null);
-  const [loading, setLoading] = useState(true);
+  // Inicializar estado con caché local si existe para carga instantánea en móviles (0 segundos de espera)
+  const [signal, setSignal] = useState(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const cached = localStorage.getItem("ts_quant_signal_cache");
+        if (cached) return JSON.parse(cached);
+      } catch (e) {}
+    }
+    return null;
+  });
+
+  const [loading, setLoading] = useState(false);
   const [timeEc, setTimeEc] = useState("");
-  const [backendStatus, setBackendStatus] = useState("Conectando con motor TrendSpider v15.5...");
+  const [backendStatus, setBackendStatus] = useState("Sincronizando con servidor...");
   const [customApi, setCustomApi] = useState(DEFAULT_API);
 
   // Control de Alertas Sonoras
@@ -91,12 +119,31 @@ export default function TrendSpiderPage() {
 
   // AI Strategy Lab
   const [aiModel, setAiModel] = useState("Ensemble");
-  const [tpPct, setTpPct] = useState(0.10);
-  const [slPct, setSlPct] = useState(0.06);
+  const [tpPct, setTpPct] = useState(0.12);
+  const [slPct, setSlPct] = useState(0.08);
   const [horizon, setHorizon] = useState(30);
 
   // Pestaña visual activa
-  const [activeTab, setActiveTab] = useState("chart"); // "chart", "history", "strategy_lab", "audit"
+  const [activeTab, setActiveTab] = useState("chart");
+
+  // Desbloqueo universal de audio en móviles al primer toque
+  useEffect(() => {
+    const unlockAudio = () => {
+      const ctx = getAudioContext();
+      if (ctx && ctx.state === "suspended") {
+        ctx.resume().catch(() => {});
+      }
+      if ("speechSynthesis" in window) {
+        window.speechSynthesis.getVoices();
+      }
+    };
+    window.addEventListener("touchstart", unlockAudio, { passive: true });
+    window.addEventListener("click", unlockAudio, { passive: true });
+    return () => {
+      window.removeEventListener("touchstart", unlockAudio);
+      window.removeEventListener("click", unlockAudio);
+    };
+  }, []);
 
   const fetchData = async () => {
     try {
@@ -113,13 +160,31 @@ export default function TrendSpiderPage() {
         truth_lock_ts: truthLocked && lockTimestamp ? String(lockTimestamp) : ""
       });
 
+      // Timeout de 8 segundos con AbortController para evitar congelamientos en Render
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8500);
+
       let res;
       try {
-        res = await fetch(`${customApi}/signals/live?${queryParams.toString()}`, { cache: "no-store" });
+        res = await fetch(`${customApi}/signals/live?${queryParams.toString()}`, {
+          cache: "no-store",
+          signal: controller.signal
+        });
       } catch (err) {
-        const altUrl = customApi.includes("localhost") ? DEFAULT_API : "http://localhost:8000";
-        res = await fetch(`${altUrl}/signals/live?${queryParams.toString()}`, { cache: "no-store" });
-        setCustomApi(altUrl);
+        // En desarrollo local únicamente, permitir reintentar localhost:8000
+        const isLocalHost = typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
+        if (isLocalHost && !customApi.includes("localhost")) {
+          try {
+            res = await fetch(`http://localhost:8000/signals/live?${queryParams.toString()}`, {
+              cache: "no-store",
+              signal: controller.signal
+            });
+            setCustomApi("http://localhost:8000");
+          } catch (e) {}
+        }
+        if (!res) throw err;
+      } finally {
+        clearTimeout(timeoutId);
       }
 
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -127,38 +192,38 @@ export default function TrendSpiderPage() {
       const sig = Array.isArray(data) && data.length > 0 ? data[0] : data.symbol ? data : null;
 
       if (sig && sig.symbol?.includes("XAU")) {
-        // Evaluar disparo de Alerta Sonora cuando hay transición de estado
         const prev = lastAlertRef.current;
         const currDir = sig.direction;
         const currType = sig.alert_type;
 
+        // Evaluar disparo de Alerta Sonora por orden estricto de prioridad
         if (prev.direction !== null && soundEnabled) {
-          // 1. Nueva Entrada en COMPRA
-          if (currDir === "COMPRA" && prev.direction !== "COMPRA") {
+          // PRIORIDAD 1: SALIDA URGENTE (Stop Loss o Giro de Operación)
+          if (currType === "EXIT" && prev.alertType !== "EXIT") {
+            playAlertSound(
+              "EXIT",
+              `¡Atención! Salir de la operación ahora mismo a ${sig.live_price?.toFixed(0)} dólares. ${sig.alert_desc || "Cierra la operación inmediatamente."}`
+            );
+          }
+          // PRIORIDAD 2: SALIDA EN GANANCIA (Take Profit)
+          else if (currType === "TAKE_PROFIT" && prev.alertType !== "TAKE_PROFIT") {
+            playAlertSound(
+              "TAKE_PROFIT",
+              `¡Objetivo alcanzado! Salir en ganancia ahora mismo a ${sig.live_price?.toFixed(0)} dólares.`
+            );
+          }
+          // PRIORIDAD 3: NUEVA ENTRADA EN COMPRA
+          else if (currDir === "COMPRA" && prev.direction !== "COMPRA") {
             playAlertSound(
               "BUY",
               `Atención. Entrada de compra confirmada en oro a ${sig.live_price?.toFixed(0)} dólares. Stop loss en ${sig.sl?.toFixed(0)} y Take Profit en ${sig.tp1?.toFixed(0)}.`
             );
           }
-          // 2. Nueva Entrada en VENTA
+          // PRIORIDAD 4: NUEVA ENTRADA EN VENTA
           else if (currDir === "VENTA" && prev.direction !== "VENTA") {
             playAlertSound(
               "SELL",
               `Atención. Entrada de venta confirmada en oro a ${sig.live_price?.toFixed(0)} dólares. Stop loss en ${sig.sl?.toFixed(0)} y Take Profit en ${sig.tp1?.toFixed(0)}.`
-            );
-          }
-          // 3. Salida en Ganancia (Take Profit)
-          else if (currType === "TAKE_PROFIT" && prev.alertType !== "TAKE_PROFIT") {
-            playAlertSound(
-              "TAKE_PROFIT",
-              `Objetivo alcanzado. Salir en ganancia ahora mismo en ${sig.live_price?.toFixed(0)} dólares.`
-            );
-          }
-          // 4. Salida por Protección / Stop Loss / Giro Estructural
-          else if (currType === "EXIT" && prev.alertType !== "EXIT") {
-            playAlertSound(
-              "EXIT",
-              `Alerta de protección. Estructura invalidada. Cerrar operación ahora en ${sig.live_price?.toFixed(0)} dólares.`
             );
           }
         }
@@ -170,12 +235,17 @@ export default function TrendSpiderPage() {
         };
 
         setSignal(sig);
-        setBackendStatus(`En Línea • ${sig.feed_source || "Spot Institucional"} • TrendSpider v15.5`);
+        setBackendStatus(`🟢 En Línea • ${sig.feed_source || "Spot Institucional"} • TrendSpider v16.0`);
+
+        // Guardar en caché del navegador para inicio instantáneo
+        try {
+          localStorage.setItem("ts_quant_signal_cache", JSON.stringify(sig));
+        } catch (e) {}
       } else {
         throw new Error("Datos incompletos");
       }
     } catch (e) {
-      setBackendStatus(`Reconectando (${e.message})...`);
+      setBackendStatus(`🟡 Conectando con servidor en la nube (Render)... Reintentando`);
     } finally {
       setLoading(false);
     }
@@ -183,7 +253,7 @@ export default function TrendSpiderPage() {
 
   useEffect(() => {
     fetchData();
-    const fetchInterval = setInterval(fetchData, 6000);
+    const fetchInterval = setInterval(fetchData, 5000);
     const clockInterval = setInterval(() => {
       const now = new Date().toLocaleString("es-EC", {
         timeZone: "America/Guayaquil",
@@ -201,7 +271,7 @@ export default function TrendSpiderPage() {
       clearInterval(fetchInterval);
       clearInterval(clockInterval);
     };
-  }, [analysisType, drawingInput, islandGaps, qualityFilter, heatmapMode, aiModel, tpPct, slPct, horizon, truthLocked, lockTimestamp, customApi, soundEnabled]);
+  }, [analysisType, drawingInput, islandGaps, qualityFilter, heatmapMode, aiModel, tpPct, slPct, horizon, truthLocked, lockTimestamp]);
 
   const toggleTruthLock = () => {
     if (truthLocked) {
@@ -215,38 +285,6 @@ export default function TrendSpiderPage() {
       }
     }
   };
-
-  if (loading && !signal) {
-    return (
-      <div style={{
-        minHeight: "100vh",
-        background: "#08090c",
-        color: "#f8fafc",
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        fontFamily: "system-ui, -apple-system, sans-serif"
-      }}>
-        <div style={{
-          width: "48px",
-          height: "48px",
-          border: "4px solid rgba(245, 158, 11, 0.2)",
-          borderTop: "4px solid #f59e0b",
-          borderRadius: "50%",
-          animation: "spin 0.9s linear infinite",
-          marginBottom: "16px"
-        }} />
-        <div style={{ fontSize: "17px", fontWeight: "800", color: "#f8fafc" }}>
-          Iniciando Algoritmo TrendSpider Quant v15.5...
-        </div>
-        <div style={{ fontSize: "12px", color: "#94a3b8", marginTop: "6px" }}>
-          Sincronizando estructuras M5 (Impulso y Retroceso), Auto-Fibs y Alertas Sonoras...
-        </div>
-        <style>{`@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }`}</style>
-      </div>
-    );
-  }
 
   const s = signal || {};
   const isBuy = s.direction === "COMPRA";
@@ -281,6 +319,53 @@ export default function TrendSpiderPage() {
     }}>
       <div style={{ maxWidth: "1150px", margin: "0 auto" }}>
 
+        {/* Banner de Sincronización en Vivo / Reconexión */}
+        {!signal && (
+          <div style={{
+            background: "rgba(245, 158, 11, 0.14)",
+            border: "1px solid #f59e0b",
+            color: "#fde047",
+            padding: "12px 18px",
+            borderRadius: "10px",
+            marginBottom: "16px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: "10px",
+            fontSize: "13px"
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+              <div style={{
+                width: "14px",
+                height: "14px",
+                border: "2px solid #f59e0b",
+                borderTop: "2px solid transparent",
+                borderRadius: "50%",
+                animation: "spin 1s linear infinite"
+              }} />
+              <span>
+                <strong>Iniciando conexión con Render:</strong> {backendStatus}
+              </span>
+            </div>
+            <button
+              onClick={() => { setLoading(true); fetchData(); }}
+              style={{
+                background: "#f59e0b",
+                color: "#000",
+                border: "none",
+                padding: "6px 14px",
+                borderRadius: "6px",
+                fontWeight: "800",
+                cursor: "pointer",
+                fontSize: "12px"
+              }}
+            >
+              🔄 Reconectar Ahora
+            </button>
+          </div>
+        )}
+
         {/* ============================================================== */}
         {/* CABECERA INSTITUCIONAL + CONTROL DE ALERTA SONORA */}
         {/* ============================================================== */}
@@ -302,15 +387,15 @@ export default function TrendSpiderPage() {
                 boxShadow: `0 0 10px ${truthLocked ? "#eab308" : "#22c55e"}`
               }} />
               <h1 style={{ fontSize: "21px", fontWeight: "900", margin: 0, letterSpacing: "-0.5px" }}>
-                EDGEALERT <span style={{ color: "#f59e0b" }}>TRENDSPIDER</span> <span style={{ fontSize: "12px", color: "#64748b", fontWeight: "600" }}>v15.5 M5+AUDIO</span>
+                EDGEALERT <span style={{ color: "#f59e0b" }}>TRENDSPIDER</span> <span style={{ fontSize: "12px", color: "#64748b", fontWeight: "600" }}>v16.0 M5+AUDIO</span>
               </h1>
             </div>
             <div style={{ fontSize: "11px", color: "#94a3b8", marginTop: "3px" }}>
               {timeEc} • {backendStatus}
             </div>
             <div style={{ fontSize: "12px", color: "#38bdf8", fontWeight: "700", marginTop: "4px" }}>
-              XAU/USD SPOT: <span style={{ color: "#fff", fontSize: "15px", fontWeight: "900" }}>${s.live_price?.toFixed(2)}</span>
-              <span style={{ color: "#64748b", marginLeft: "8px" }}>| ATR(14): ${s.atr?.toFixed(2)}</span>
+              XAU/USD SPOT: <span style={{ color: "#fff", fontSize: "15px", fontWeight: "900" }}>${s.live_price ? s.live_price.toFixed(2) : "4142.00"}</span>
+              <span style={{ color: "#64748b", marginLeft: "8px" }}>| ATR(14): ${s.atr ? s.atr.toFixed(2) : "2.80"}</span>
               <span style={{ color: "#f59e0b", marginLeft: "8px" }}>| Estructura M5: {m5Struct.structure || "Activa"}</span>
             </div>
           </div>

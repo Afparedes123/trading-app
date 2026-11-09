@@ -11,7 +11,7 @@ from heatmap_engine import TrendSpiderHeatmapEngine
 from strategy_lab import TrendSpiderStrategyLab
 from mtfa_engine import TrendSpiderMTFAEngine, aggregate_timeframe_candles
 
-app = FastAPI(title="EdgeAlert - TRENDSPIDER ALGORITHMIC ENGINE v15.0")
+app = FastAPI(title="EdgeAlert - TRENDSPIDER ALGORITHMIC ENGINE v15.5")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -49,6 +49,19 @@ def init_db():
         tp2_price REAL DEFAULT 0,
         max_favorable_price REAL DEFAULT 0
     )""")
+    # Tabla de Historial / Bitácora de Alertas (para auditar 8am - 11am y todo el día)
+    c.execute("""CREATE TABLE IF NOT EXISTS signal_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts INTEGER,
+        time_ec TEXT,
+        event_type TEXT,
+        direction TEXT,
+        price REAL,
+        sl REAL,
+        tp1 REAL,
+        pnl REAL DEFAULT 0,
+        reason TEXT
+    )""")
     # Tabla de configuración de usuario persistente
     c.execute("""CREATE TABLE IF NOT EXISTS app_settings (
         key TEXT PRIMARY KEY,
@@ -66,10 +79,10 @@ DEFAULT_SETTINGS = {
     "island_gaps": "Respect",          # "Respect" o "Ignore"
     "quality_filter": "Most Relevant", # "Most Relevant" (Top 1%), "Moderately Relevant", "Unfiltered"
     "heatmap_mode": "Horizontal",      # "Horizontal", "Depth", "Trends", "Off"
-    "truth_lock_ts": "",               # Timestamp congelado o vacío (Desbloqueado / Red Line)
+    "truth_lock_ts": "",               # Timestamp congelado o vacío
     "ai_model": "Ensemble",            # "Ensemble", "RandomForest", "Logistic", "KNN", "NaiveBayes"
-    "tp_pct": "0.14",                  # 0.14% TP (~$5.50 en Oro)
-    "sl_pct": "0.08",                  # 0.08% SL (~$3.20 en Oro)
+    "tp_pct": "0.10",                  # ~0.10% TP (~$4.10 en Oro)
+    "sl_pct": "0.06",                  # ~0.06% SL (~$2.50 en Oro)
     "horizon": "30"                    # 30 velas de horizonte
 }
 
@@ -96,6 +109,48 @@ def set_setting(key: str, val: str):
     except Exception as e:
         print(f"Error set_setting: {e}")
 
+def log_signal_event(event_type: str, direction: str, price: float, sl: float = 0.0, tp1: float = 0.0, pnl: float = 0.0, reason: str = ""):
+    """Guarda cada entrada, salida o break-even en la bitácora histórica"""
+    try:
+        now_dt = datetime.now(EC_TZ)
+        now_ts = int(now_dt.timestamp())
+        time_str = now_dt.strftime("%H:%M:%S")
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        # Evitar duplicar el mismo evento en los últimos 45 segundos
+        c.execute("SELECT ts, event_type, direction FROM signal_history ORDER BY id DESC LIMIT 1")
+        last = c.fetchone()
+        if last and last[1] == event_type and last[2] == direction and (now_ts - last[0]) < 45:
+            conn.close()
+            return
+        c.execute("""INSERT INTO signal_history (ts, time_ec, event_type, direction, price, sl, tp1, pnl, reason)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                  (now_ts, time_str, event_type, direction, round(price, 2), round(sl, 2), round(tp1, 2), round(pnl, 2), reason))
+        # Conservar los últimos 100 eventos
+        c.execute("DELETE FROM signal_history WHERE id NOT IN (SELECT id FROM signal_history ORDER BY id DESC LIMIT 100)")
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Error log_signal_event: {e}")
+
+def get_signal_history(limit: int = 25) -> List[Dict[str, Any]]:
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT id, ts, time_ec, event_type, direction, price, sl, tp1, pnl, reason FROM signal_history ORDER BY id DESC LIMIT ?", (limit,))
+        rows = c.fetchall()
+        conn.close()
+        history = []
+        for r in rows:
+            history.append({
+                "id": r[0], "ts": r[1], "time_ec": r[2], "event_type": r[3],
+                "direction": r[4], "price": r[5], "sl": r[6], "tp1": r[7],
+                "pnl": r[8], "reason": r[9]
+            })
+        return history
+    except:
+        return []
+
 class TVWebhookPayload(BaseModel):
     symbol: Optional[str] = "XAUUSD"
     price: Optional[float] = None
@@ -107,7 +162,6 @@ class TVWebhookPayload(BaseModel):
     interval: Optional[str] = "1"
 
 def get_live_spot_price() -> Tuple[float, str]:
-    """Obtiene el tick en vivo compatible con el feed de TradingView (Swissquote, Gold-API, Yahoo)"""
     now_ts = int(datetime.now(timezone.utc).timestamp())
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -145,7 +199,6 @@ def get_live_spot_price() -> Tuple[float, str]:
     except:
         pass
 
-    # Respaldo de base de datos local
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -157,10 +210,10 @@ def get_live_spot_price() -> Tuple[float, str]:
     except:
         pass
 
-    return 3946.50, "FALLBACK"
+    return 4120.50, "FALLBACK"
 
 def sync_historical_1m_candles():
-    """Descarga hasta 120-150 velas reales de 1 minuto para alimentar los motores de geometría y ML"""
+    """Descarga hasta 240 velas reales de 1 minuto (4 horas) para cubrir todo el movimiento de la mañana"""
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1m&range=1d"
@@ -169,13 +222,13 @@ def sync_historical_1m_candles():
         if r.status_code == 200:
             res = r.json().get("chart", {}).get("result", [])
             if res:
-                timestamps = res[0].get("timestamp", [])[-150:]
+                timestamps = res[0].get("timestamp", [])[-240:]
                 quote = res[0].get("indicators", {}).get("quote", [{}])[0]
-                opens = quote.get("open", [])[-150:]
-                highs = quote.get("high", [])[-150:]
-                lows = quote.get("low", [])[-150:]
-                closes = quote.get("close", [])[-150:]
-                vols = quote.get("volume", [])[-150:]
+                opens = quote.get("open", [])[-240:]
+                highs = quote.get("high", [])[-240:]
+                lows = quote.get("low", [])[-240:]
+                closes = quote.get("close", [])[-240:]
+                vols = quote.get("volume", [])[-240:]
 
                 valid_closes = [c for c in closes if c is not None and c > 1000]
                 basis = (live_p - valid_closes[-1]) if valid_closes else 0.0
@@ -203,7 +256,6 @@ def sync_historical_1m_candles():
     except Exception as e:
         print(f"Sync historical 1m warning: {e}")
 
-    # Inicialización sintética de respaldo si no hay historial
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -211,8 +263,8 @@ def sync_historical_1m_candles():
         if c.fetchone()[0] < 60:
             base, _ = get_live_spot_price()
             now_min = (int(datetime.now(timezone.utc).timestamp()) // 60) * 60
-            for i in range(120):
-                ts = now_min - ((120 - i) * 60)
+            for i in range(180):
+                ts = now_min - ((180 - i) * 60)
                 wave = math.sin(i / 8.0) * 4.5 + math.cos(i / 4.0) * 2.0
                 o = round(base + wave, 2)
                 cl = round(base + math.sin((i + 1) / 8.0) * 4.5 + math.cos((i + 1) / 4.0) * 2.0, 2)
@@ -226,7 +278,6 @@ def sync_historical_1m_candles():
         print(f"Init fallback error: {e}")
 
 def update_current_1m_candle(price: float, source: str = "FEED"):
-    """Actualiza la vela de 1 minuto en curso con cada nuevo tick"""
     try:
         now_min = (int(datetime.now(timezone.utc).timestamp()) // 60) * 60
         conn = sqlite3.connect(DB_PATH)
@@ -243,14 +294,13 @@ def update_current_1m_candle(price: float, source: str = "FEED"):
         else:
             c.execute("INSERT INTO ohlc_1m (ts,open,high,low,close,volume,source) VALUES (?,?,?,?,?,?,?)",
                       (now_min, price, price, price, price, 1, source))
-        # Conservar hasta 360 velas de 1m (6 horas)
         c.execute("DELETE FROM ohlc_1m WHERE ts NOT IN (SELECT ts FROM ohlc_1m ORDER BY ts DESC LIMIT 360)")
         conn.commit()
         conn.close()
     except Exception as e:
         print(f"Update 1m error: {e}")
 
-def get_1m_candles(limit: int = 120) -> List[Dict[str, Any]]:
+def get_1m_candles(limit: int = 180) -> List[Dict[str, Any]]:
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -264,15 +314,9 @@ def get_1m_candles(limit: int = 120) -> List[Dict[str, Any]]:
             body = abs(cl - o)
             rng = max(h - l, 0.05)
             candles.append({
-                "ts": r[0],
-                "open": o,
-                "high": h,
-                "low": l,
-                "close": cl,
-                "volume": float(r[5]),
-                "source": r[6],
-                "body": round(body, 2),
-                "range": round(rng, 2),
+                "ts": r[0], "open": o, "high": h, "low": l, "close": cl,
+                "volume": float(r[5]), "source": r[6],
+                "body": round(body, 2), "range": round(rng, 2),
                 "body_ratio": round(body / rng, 2),
                 "upper_wick": round(h - max(o, cl), 2),
                 "lower_wick": round(min(o, cl) - l, 2),
@@ -280,8 +324,157 @@ def get_1m_candles(limit: int = 120) -> List[Dict[str, Any]]:
             })
         return candles
     except Exception as e:
-        print(f"get_1m_candles error: {e}")
         return []
+
+def detect_m5_swing_pullbacks(candles_5m: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Detecta la estructura clásica de Impulso y Retroceso en M5 (exactamente como el gráfico de 08:00 a 10:30):
+    1. Impulso Alcista -> Retroceso al 38.2%-61.8% (HL) -> Vela Verde de Giro (Rebote de Compra)
+    2. Ruptura de Máximo Previo (BOS Alcista) -> Continuación
+    3. Doble Techo + Ruptura de Soporte (CHoCH Bajista) -> Cambio de Tendencia a Venta
+    4. Impulso Bajista -> Rebote al 38.2%-61.8% (LH) -> Vela Roja de Rechazo (Re-entrada Venta)
+    """
+    if len(candles_5m) < 6:
+        return {"signal": "NONE", "structure": "CALIBRANDO_M5", "reason": "", "fib_ret": 0.5}
+
+    window = candles_5m[-24:] # últimas 2 horas de velas de 5m
+    highs = [c["high"] for c in window]
+    lows = [c["low"] for c in window]
+    last_c = window[-1]
+    prev_c = window[-2]
+    prev2_c = window[-3] if len(window) >= 3 else prev_c
+
+    # Identificar pivotes recientes en M5
+    swing_highs = []
+    swing_lows = []
+    for i in range(1, len(window) - 1):
+        if window[i]["high"] >= window[i - 1]["high"] and window[i]["high"] >= window[i + 1]["high"]:
+            swing_highs.append((i, window[i]["high"]))
+        if window[i]["low"] <= window[i - 1]["low"] and window[i]["low"] <= window[i + 1]["low"]:
+            swing_lows.append((i, window[i]["low"]))
+
+    if not swing_highs:
+        swing_highs = [(0, max(highs))]
+    if not swing_lows:
+        swing_lows = [(0, min(lows))]
+
+    last_sh_idx, last_sh = swing_highs[-1]
+    prev_sh = swing_highs[-2][1] if len(swing_highs) >= 2 else last_sh
+    last_sl_idx, last_sl = swing_lows[-1]
+    prev_sl = swing_lows[-2][1] if len(swing_lows) >= 2 else last_sl
+
+    live_p = last_c["close"]
+    last_bull = last_c["close"] >= last_c["open"]
+    prev_bull = prev_c["close"] >= prev_c["open"]
+
+    # Rango de la última pierna M5
+    leg_range = max(abs(last_sh - last_sl), 1.5)
+
+    # Caso 1: Estructura Alcista M5 (Impulso -> Retroceso HL -> Giro Alcista)
+    if last_sl_idx < last_sh_idx or live_p >= (last_sh + last_sl) / 2.0:
+        fib_ret = round((last_sh - live_p) / leg_range, 3)
+        low_fib_ret = round((last_sh - min(last_c["low"], prev_c["low"])) / leg_range, 3)
+
+        # A. Rebote de Compra tras Retroceso (el mínimo tocó entre 0.30 y 0.75 Fib y ahora cierra vela verde o mecha inferior larga)
+        if 0.28 <= low_fib_ret <= 0.78 and (last_bull or (last_c["close"] - last_c["low"]) >= 1.2):
+            if last_sl >= prev_sl - 1.5: # Mantiene estructura HL
+                return {
+                    "signal": "BUY_PULLBACK",
+                    "structure": "IMPULSO + RETROCESO ALCISTA M5 (HL)",
+                    "reason": f"El retroceso frenó en el {low_fib_ret*100:.0f}% de Fibonacci (${min(last_c['low'], prev_c['low']):.2f}) y confirmó vela de giro alcista rumbo a ${last_sh:.2f}.",
+                    "fib_ret": fib_ret,
+                    "last_sh": last_sh,
+                    "last_sl": last_sl
+                }
+
+        # B. CHoCH Bajista (Doble techo en M5 y ruptura del soporte previo hacia abajo, como a las 09:30 en la foto)
+        if abs(last_sh - prev_sh) <= 2.5 and live_p < last_sl and not last_bull:
+            return {
+                "signal": "SELL_CHOCH",
+                "structure": "CAMBIO DE CARÁCTER BAJISTA M5 (Doble Techo + Quiebre)",
+                "reason": f"Techo rechazado en ${last_sh:.2f} y ruptura del soporte estructural M5 (${last_sl:.2f}). Giro confirmado a VENTA.",
+                "fib_ret": fib_ret,
+                "last_sh": last_sh,
+                "last_sl": last_sl
+            }
+
+    # Caso 2: Estructura Bajista M5 (Impulso Bajista -> Rebote LH -> Rechazo a la Baja)
+    if last_sh_idx < last_sl_idx or live_p < (last_sh + last_sl) / 2.0:
+        fib_ret = round((live_p - last_sl) / leg_range, 3)
+        high_fib_ret = round((max(last_c["high"], prev_c["high"]) - last_sl) / leg_range, 3)
+
+        # A. Re-entrada en Venta tras Rebote (subió al 30%-75% del impulso bajista y rechaza en rojo)
+        if 0.28 <= high_fib_ret <= 0.78 and (not last_bull or (last_c["high"] - last_c["close"]) >= 1.2):
+            if last_sh <= prev_sh + 1.5: # Mantiene LH
+                return {
+                    "signal": "SELL_PULLBACK",
+                    "structure": "IMPULSO + RETROCESO BAJISTA M5 (LH)",
+                    "reason": f"El rebote alcista agotó fuerza en el {high_fib_ret*100:.0f}% de Fibonacci (${max(last_c['high'], prev_c['high']):.2f}) iniciando nuevo impulso bajista hacia ${last_sl:.2f}.",
+                    "fib_ret": fib_ret,
+                    "last_sh": last_sh,
+                    "last_sl": last_sl
+                }
+
+        # B. Giro Alcista desde el Suelo (Doble piso / Absorción en soporte como a las 10:15 en $4115)
+        if (last_c["low"] <= last_sl + 1.2 or prev_c["low"] <= last_sl + 1.2) and last_bull and (last_c["close"] - last_c["open"]) >= 1.2:
+            return {
+                "signal": "BUY_REVERSAL",
+                "structure": "ABSORCIÓN INSTITUCIONAL EN SUELO M5",
+                "reason": f"Fuerte rechazo comprador en piso ${last_sl:.2f} con vela envolvente M5 confirmada.",
+                "fib_ret": fib_ret,
+                "last_sh": last_sh,
+                "last_sl": last_sl
+            }
+
+    return {
+        "signal": "NONE",
+        "structure": "DESARROLLO M5",
+        "reason": f"Rango M5 entre soporte ${last_sl:.2f} y techo ${last_sh:.2f}.",
+        "fib_ret": 0.5,
+        "last_sh": last_sh,
+        "last_sl": last_sl
+    }
+
+def reconstruct_morning_signals_if_empty(candles_1m: List[Dict[str, Any]]):
+    """
+    Si la tabla signal_history está vacía al arrancar, analiza las últimas 3 horas de velas M5
+    para poblar la bitácora con las entradas y salidas exactas que ocurrieron en las estructuras previas (ej: 08:00 a 10:30).
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM signal_history")
+        count = c.fetchone()[0]
+        conn.close()
+        if count > 0 or len(candles_1m) < 35:
+            return
+
+        candles_5m = aggregate_timeframe_candles(candles_1m, tf_minutes=5)
+        if len(candles_5m) < 8:
+            return
+
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        for idx in range(6, len(candles_5m)):
+            sub_m5 = candles_5m[:idx + 1]
+            m5_eval = detect_m5_swing_pullbacks(sub_m5)
+            sig = m5_eval["signal"]
+            if sig != "NONE":
+                candle = sub_m5[-1]
+                dt_ec = datetime.fromtimestamp(candle["ts"], tz=EC_TZ).strftime("%H:%M:%S")
+                price = candle["close"]
+                if "BUY" in sig:
+                    c.execute("""INSERT INTO signal_history (ts, time_ec, event_type, direction, price, sl, tp1, pnl, reason)
+                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                              (candle["ts"], dt_ec, "ENTER", "COMPRA", price, round(price - 2.8, 2), round(price + 4.5, 2), 0.0, m5_eval["structure"] + ": " + m5_eval["reason"]))
+                elif "SELL" in sig:
+                    c.execute("""INSERT INTO signal_history (ts, time_ec, event_type, direction, price, sl, tp1, pnl, reason)
+                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                              (candle["ts"], dt_ec, "ENTER", "VENTA", price, round(price + 2.8, 2), round(price - 4.5, 2), 0.0, m5_eval["structure"] + ": " + m5_eval["reason"]))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Reconstruct history error: {e}")
 
 def get_last_signal() -> Dict[str, Any]:
     try:
@@ -336,7 +529,7 @@ def update_last_signal(
         print(f"update_last_signal error: {e}")
 
 # ==============================================================================
-# MOTOR ALGORÍTMICO INTEGRAL TRENDSPIDER v15.0
+# MOTOR ALGORÍTMICO INTEGRAL TRENDSPIDER v15.5 (CON ESTRUCTURAS M5 + AUDIO)
 # ==============================================================================
 
 def analyze_market_trendspider(
@@ -351,16 +544,6 @@ def analyze_market_trendspider(
     horizon: Optional[int] = None,
     truth_lock_ts: Optional[str] = None
 ) -> Dict[str, Any]:
-    """
-    Orquesta los 6 módulos algorítmicos de TrendSpider:
-    1. Auto-Trendlines con Geometría Computacional y Scoring Engine
-    2. Auto-Fibs con Selección Dinámica de Anclajes y Zona Dorada (0.382 - 0.618 OTE)
-    3. Heatmap Matrix 40x60 (Horizontal, Depth con Difusión 2D, Trends crudo)
-    4. Truth in Analysis Timestamp (Anti-Repintado y prueba Out-of-Sample)
-    5. AI Strategy Lab con Clasificadores Estadísticos, Crossbreeding y Target Labeling
-    6. MTFA Multi-Timeframe con Alertas Touch Cushion (Break through, Touch, Bounce)
-    """
-    # 0. Resolver Parámetros (Query / Base de Datos / Defaults)
     def _clean(val, key, default):
         if val is None or hasattr(val, "default"):
             stored = get_setting(key)
@@ -373,8 +556,8 @@ def analyze_market_trendspider(
     quality_filter = str(_clean(quality_filter, "quality_filter", "Most Relevant"))
     heatmap_mode = str(_clean(heatmap_mode, "heatmap_mode", "Horizontal"))
     ai_model = str(_clean(ai_model, "ai_model", "Ensemble"))
-    tp_pct = float(_clean(tp_pct, "tp_pct", 0.14))
-    sl_pct = float(_clean(sl_pct, "sl_pct", 0.08))
+    tp_pct = float(_clean(tp_pct, "tp_pct", 0.10))
+    sl_pct = float(_clean(sl_pct, "sl_pct", 0.06))
     horizon = int(_clean(horizon, "horizon", 30))
     truth_lock_ts = _clean(truth_lock_ts, "truth_lock_ts", "")
     if hasattr(truth_lock_ts, "default"):
@@ -383,16 +566,17 @@ def analyze_market_trendspider(
     live_price, feed_source = get_live_spot_price()
     update_current_1m_candle(live_price, "FEED")
 
-    candles_1m = get_1m_candles(120)
-    if len(candles_1m) < 40:
+    candles_1m = get_1m_candles(180)
+    if len(candles_1m) < 45:
         sync_historical_1m_candles()
-        candles_1m = get_1m_candles(120)
+        candles_1m = get_1m_candles(180)
+
+    # Reconstruir historial de la mañana si la base de datos estaba recién creada
+    reconstruct_morning_signals_if_empty(candles_1m)
 
     # 1. Truth in Analysis (Anti-Repintado)
-    # Si truth_lock_ts está activo, congelamos el análisis en esa vela exacta
     is_locked = False
     in_sample_candles = candles_1m
-    out_of_sample_candles = []
     lock_index = -1
 
     if truth_lock_ts and truth_lock_ts != "":
@@ -405,11 +589,10 @@ def analyze_market_trendspider(
             if 15 <= lock_index < len(candles_1m):
                 is_locked = True
                 in_sample_candles = candles_1m[:lock_index + 1]
-                out_of_sample_candles = candles_1m[lock_index + 1:]
         except Exception as e:
             print(f"Truth lock parse error: {e}")
 
-    # 2. Módulo 1: Auto-Trendlines (TrendSpider Scoring Engine)
+    # 2. Módulo 1: Auto-Trendlines
     trend_engine = TrendSpiderAutoTrendlines(
         analysis_type=analysis_type,
         drawing_input=drawing_input,
@@ -434,7 +617,7 @@ def analyze_market_trendspider(
     heatmap_engine = TrendSpiderHeatmapEngine(mode=heatmap_mode)
     heatmap_data = heatmap_engine.compute_heatmaps(in_sample_candles, active_trendlines)
 
-    # 5. Módulo 5: AI Strategy Lab (Modelos Predictivos y Crossbreeding)
+    # 5. Módulo 5: AI Strategy Lab
     strategy_lab = TrendSpiderStrategyLab(
         tp_pct=tp_pct,
         sl_pct=sl_pct,
@@ -443,10 +626,10 @@ def analyze_market_trendspider(
     )
     ai_strategy_data = strategy_lab.train_and_evaluate(in_sample_candles)
 
-    # 6. Módulo 6: Multi-Timeframe Analysis (MTFA) & Dynamic Alerts
-    mtfa_engine = TrendSpiderMTFAEngine(touch_cushion_atr_mult=0.30)
+    # 6. Módulo 6: Multi-Timeframe Analysis (M5 Impulso y Retroceso + Alertas)
+    mtfa_engine = TrendSpiderMTFAEngine(touch_cushion_atr_mult=0.35)
     candles_5m = aggregate_timeframe_candles(in_sample_candles, tf_minutes=5)
-    candles_15m = aggregate_timeframe_candles(in_sample_candles, tf_minutes=15)
+    m5_swing = detect_m5_swing_pullbacks(candles_5m)
 
     last_candle = in_sample_candles[-1]
     prev_candle = in_sample_candles[-2] if len(in_sample_candles) >= 2 else last_candle
@@ -459,19 +642,30 @@ def analyze_market_trendspider(
     )
 
     # ==========================================================================
-    # MOTOR DE DECISIÓN MULTIFACTORIAL (ELIMINACIÓN RADICAL DE RUIDO)
+    # MOTOR DE PUNTUACIÓN Y CONFLUENCIA (CAPTURA DE IMPULSOS Y RETROCESOS M5)
     # ==========================================================================
-    # Para que una operación se abra, debe tener CONFLUENCIA COMPROBADA:
-    # 1. Gatillo de Ruptura al Cierre (Breakout) o Rebote (Bounce) sobre Trendline Top 1%
-    # 2. Confluencia con Zona Dorada Fibonacci (0.382 - 0.618 OTE) o Cluster de Liquidez Heatmap
-    # 3. Filtro de Probabilidad AI Strategy Lab >= 65-70% (Ensemble / Random Forest)
-    # 4. Filtro de Sobreextensión RSI (no comprar en RSI > 74, no vender en RSI < 26)
-
     buy_points = 0
     sell_points = 0
     confluences_audit = []
 
-    # Layer 1: Auto-Trendlines & Breakout / Bounce
+    # Pilar A: Estructura M5 de Impulso y Retroceso (Como en el gráfico de 08:00 - 10:30)
+    m5_sig = m5_swing["signal"]
+    if m5_sig in ["BUY_PULLBACK", "BUY_REVERSAL"]:
+        buy_points += 5
+        confluences_audit.append({
+            "module": "ESTRUCTURA_M5", "side": "COMPRA", "weight": 5,
+            "title": f"🎯 {m5_swing['structure']}",
+            "desc": m5_swing["reason"]
+        })
+    elif m5_sig in ["SELL_PULLBACK", "SELL_CHOCH"]:
+        sell_points += 5
+        confluences_audit.append({
+            "module": "ESTRUCTURA_M5", "side": "VENTA", "weight": 5,
+            "title": f"🎯 {m5_swing['structure']}",
+            "desc": m5_swing["reason"]
+        })
+
+    # Pilar B: Auto-Trendlines & Breakout / Bounce
     has_bullish_breakout = any(l.get("breakout") == "BULLISH_BREAKOUT" for l in active_trendlines)
     has_bearish_breakout = any(l.get("breakout") == "BEARISH_BREAKOUT" for l in active_trendlines)
     has_bullish_bounce = any(a["trigger"] == "BOUNCE" and a["side"] == "COMPRA" for a in dynamic_alerts)
@@ -482,14 +676,14 @@ def analyze_market_trendspider(
         confluences_audit.append({
             "module": "AUTO_TRENDLINES", "side": "COMPRA", "weight": 4,
             "title": "RUPTURA DIRECTRIZ AL CIERRE (Breakout)",
-            "desc": "Cierre de vela confirmado superando la línea de tendencia bajista. Filtro anti-fakeout verificado."
+            "desc": "Cierre de vela confirmado superando la directriz bajista."
         })
     elif has_bullish_bounce:
         buy_points += 4
         confluences_audit.append({
             "module": "AUTO_TRENDLINES", "side": "COMPRA", "weight": 4,
             "title": "REBOTE LIMPIO EN SOPORTE FRACTAL (Bounce)",
-            "desc": "Rechazo alcista dentro del Colchón de Sensibilidad ATR sin perforación estructural."
+            "desc": "Rechazo alcista dentro del Colchón de Sensibilidad ATR."
         })
 
     if has_bearish_breakout:
@@ -497,41 +691,41 @@ def analyze_market_trendspider(
         confluences_audit.append({
             "module": "AUTO_TRENDLINES", "side": "VENTA", "weight": 4,
             "title": "RUPTURA DIRECTRIZ AL CIERRE (Breakdown)",
-            "desc": "Cierre de vela confirmado perforando el soporte tendencial. Filtro anti-fakeout verificado."
+            "desc": "Cierre de vela confirmado perforando el soporte tendencial."
         })
     elif has_bearish_bounce:
         sell_points += 4
         confluences_audit.append({
             "module": "AUTO_TRENDLINES", "side": "VENTA", "weight": 4,
             "title": "RECHAZO LIMPIO EN RESISTENCIA FRACTAL (Bounce)",
-            "desc": "Toque en el techo dentro del Colchón de Sensibilidad ATR seguido de mecha bajista prominente."
+            "desc": "Toque en la directriz superior seguido de rechazo bajista."
         })
 
-    # Layer 2: Auto-Fibonacci Golden Zone Confluence
+    # Pilar C: Auto-Fibonacci Golden Zone Confluence
     fib_gz = fib_data.get("golden_zone", {})
     if fib_gz.get("in_zone", False):
-        if fib_data.get("impulse_direction") == "BULLISH":
+        if fib_data.get("impulse_direction") == "BULLISH" and last_candle["bullish"]:
             buy_points += 3
             confluences_audit.append({
                 "module": "AUTO_FIBS", "side": "COMPRA", "weight": 3,
-                "title": f"ZONA DORADA OTE (Fib 0.50 - 0.618: {fib_gz.get('low')} - {fib_gz.get('high')})",
-                "desc": "El precio descansó en la zona de descuento institucional ideal para reanudar la tendencia alcista."
+                "title": f"ZONA DORADA OTE (Fib 0.382 - 0.618: ${fib_gz.get('low')} - ${fib_gz.get('high')})",
+                "desc": "Fin de retroceso en zona institucional con vela verde de continuación."
             })
-        else:
+        elif fib_data.get("impulse_direction") == "BEARISH" and not last_candle["bullish"]:
             sell_points += 3
             confluences_audit.append({
                 "module": "AUTO_FIBS", "side": "VENTA", "weight": 3,
-                "title": f"ZONA DORADA OTE (Fib 0.50 - 0.618: {fib_gz.get('low')} - {fib_gz.get('high')})",
-                "desc": "El retroceso completó su impulso correctivo en la zona dorada bajista para continuar la caída."
+                "title": f"ZONA DORADA OTE (Fib 0.382 - 0.618: ${fib_gz.get('low')} - ${fib_gz.get('high')})",
+                "desc": "Fin de rebote correctivo en zona dorada bajista con vela roja."
             })
 
-    # Layer 3: Heatmap Liquidity & Order Block Confluence
+    # Pilar D: Heatmap Liquidity & Order Block Confluence
     top_clusters = heatmap_data.get("top_clusters", [])
     near_cluster_support = False
     near_cluster_resistance = False
     for cl in top_clusters:
         p_dist = abs(live_price - cl["price"])
-        if p_dist <= (0.45 * atr):
+        if p_dist <= (0.55 * atr):
             if live_price >= cl["price"]:
                 near_cluster_support = True
             else:
@@ -542,44 +736,44 @@ def analyze_market_trendspider(
         confluences_audit.append({
             "module": "HEATMAP_MATRIX", "side": "COMPRA", "weight": 2,
             "title": "BLOQUE DE LIQUIDEZ INSTITUCIONAL EN MATRIZ 40x60",
-            "desc": "Alta densidad espacial de Puntos Especiales actuando como piso magnético de absorción de ventas."
+            "desc": "Alta densidad de Puntos Especiales actuando como piso de absorción."
         })
     if near_cluster_resistance:
         sell_points += 2
         confluences_audit.append({
             "module": "HEATMAP_MATRIX", "side": "VENTA", "weight": 2,
             "title": "BARRERA DE LIQUIDEZ INSTITUCIONAL EN MATRIZ 40x60",
-            "desc": "Alta densidad de órdenes pasivas limitando la subida y forzando giros a la baja."
+            "desc": "Alta densidad de órdenes pasivas frenando la subida."
         })
 
-    # Layer 4: AI Strategy Lab Probability Filter
+    # Pilar E: AI Strategy Lab Probability Filter
     ai_buy_prob = ai_strategy_data.get("buy_prob", 0.50)
     ai_sell_prob = ai_strategy_data.get("sell_prob", 0.50)
     ai_confidence = ai_strategy_data.get("ensemble_confidence", 50)
 
-    if ai_buy_prob >= 0.65:
+    if ai_buy_prob >= 0.58:
         buy_points += 3
         confluences_audit.append({
             "module": "AI_STRATEGY_LAB", "side": "COMPRA", "weight": 3,
-            "title": f"MODELO IA ({ai_model}): PROBABILIDAD DE ÉXITO {ai_buy_prob*100:.0f}%",
-            "desc": f"El clasificador supervisado predice objetivo de Take Profit antes de Stop Loss con alta significancia estadística."
+            "title": f"MODELO IA ({ai_model}): PROBABILIDAD {ai_buy_prob*100:.0f}%",
+            "desc": "Clasificador estadístico confirma ventaja matemática compradora."
         })
-    elif ai_sell_prob >= 0.65:
+    elif ai_sell_prob >= 0.58:
         sell_points += 3
         confluences_audit.append({
             "module": "AI_STRATEGY_LAB", "side": "VENTA", "weight": 3,
-            "title": f"MODELO IA ({ai_model}): PROBABILIDAD DE ÉXITO {ai_sell_prob*100:.0f}%",
-            "desc": f"El clasificador supervisado predice objetivo de Take Profit antes de Stop Loss con alta significancia estadística."
+            "title": f"MODELO IA ({ai_model}): PROBABILIDAD {ai_sell_prob*100:.0f}%",
+            "desc": "Clasificador estadístico confirma ventaja matemática vendedora."
         })
 
-    # Layer 5: S/R y Espacio Libre
-    support_val = min(l["current_y"] for l in active_trendlines if l["kind"] == "SUPPORT") if any(l["kind"] == "SUPPORT" for l in active_trendlines) else (live_price - atr * 2.5)
-    resistance_val = max(l["current_y"] for l in active_trendlines if l["kind"] == "RESISTANCE") if any(l["kind"] == "RESISTANCE" for l in active_trendlines) else (live_price + atr * 2.5)
+    # S/R y Espacio Libre
+    support_val = min(l["current_y"] for l in active_trendlines if l["kind"] == "SUPPORT") if any(l["kind"] == "SUPPORT" for l in active_trendlines) else min(m5_swing.get("last_sl", live_price - 4.0), live_price - atr * 2.0)
+    resistance_val = max(l["current_y"] for l in active_trendlines if l["kind"] == "RESISTANCE") if any(l["kind"] == "RESISTANCE" for l in active_trendlines) else max(m5_swing.get("last_sh", live_price + 4.0), live_price + atr * 2.0)
     room_up = max(0.0, round(resistance_val - live_price, 2))
     room_down = max(0.0, round(live_price - support_val, 2))
 
     # ==========================================================================
-    # GESTIÓN INTELIGENTE DEL CICLO DE VIDA DE LA OPERACIÓN (ANTI-RUIDO)
+    # GESTIÓN DEL CICLO DE VIDA DE LA OPERACIÓN Y DISPARO SONORO
     # ==========================================================================
     last_sig = get_last_signal()
     active_dir = last_sig["direction"]
@@ -589,16 +783,16 @@ def analyze_market_trendspider(
     current_tp2 = last_sig["tp2_price"]
     max_fav = last_sig["max_favorable_price"] if last_sig["max_favorable_price"] > 1000 else entry_p
 
-    # Dimensionamiento dinámico de Stop Loss y Take Profit por ATR institucional
-    sl_distance = round(max(2.5, min(atr * 1.3, 4.5)), 2)
-    tp1_distance = round(max(3.8, min(atr * 2.0, 7.5)), 2)
-    tp2_distance = round(max(6.0, min(atr * 3.5, 12.0)), 2)
+    # Dimensionamiento dinámico de Stop Loss (~$2.80) y Take Profit (~$4.20 a $5.50) para M5
+    sl_distance = round(max(2.4, min(atr * 1.4, 4.0)), 2)
+    tp1_distance = round(max(3.6, min(atr * 2.2, 6.5)), 2)
+    tp2_distance = round(max(6.0, min(atr * 3.5, 11.0)), 2)
 
     final_dir = "ESPERA"
-    alert_text = "⏸ ESPERANDO CONFLUENCIA CUÁNTICA"
+    alert_text = "⏸ ESPERANDO FIN DE RETROCESO O RUPTURA M5"
     alert_type = "WAIT"
-    alert_desc = f"Analizando {len(active_trendlines)} vectores y matriz 40x60. Sin gatillo limpio de alta probabilidad."
-    flip_reason = "Filtro anti-ruido activo"
+    alert_desc = f"Estructura M5: {m5_swing['structure']}. {m5_swing['reason']}"
+    flip_reason = "Monitoreando estructura Impulso/Retroceso"
     confidence_score = max(ai_confidence, 55)
 
     # 1. Monitoreo de Operación COMPRA ya abierta
@@ -608,52 +802,56 @@ def analyze_market_trendspider(
             max_fav = live_price
             update_last_signal("COMPRA", "HOLD_COMPRA", entry_p, current_sl, current_tp1, current_tp2, max_fav)
 
-        # Regla Anti-Ruido 1: Trailing Stop Dinámico a Break-Even tras +1R
-        if (max_fav - entry_p) >= (sl_distance * 0.9) and current_sl < entry_p:
-            current_sl = entry_p + 0.30 # Lock en ganancias mínimas / Break-even seguro
+        # Regla 1: Proteger en Break-Even cuando avance >= +$2.00 USD
+        if (max_fav - entry_p) >= 2.00 and current_sl < entry_p:
+            current_sl = round(entry_p + 0.30, 2)
             update_last_signal("COMPRA", "BREAK_EVEN_LOCKED", entry_p, current_sl, current_tp1, current_tp2, max_fav)
+            log_signal_event("BREAK_EVEN", "COMPRA", live_price, current_sl, current_tp1, pnl, "Stop Loss movido a Break-Even (+0.30 USD asegurados)")
 
-        # Regla Anti-Ruido 2: Take Profit Estructural TP1 o TP2
-        if live_price >= current_tp1 and current_tp1 > 1000:
+        # Regla 2: Salida por Take Profit o por Giro Bajista M5 en Ganancia
+        if (live_price >= current_tp1 and current_tp1 > 1000) or (pnl >= 2.20 and m5_sig in ["SELL_CHOCH", "SELL_PULLBACK"]):
             update_last_signal("ESPERA", "TP_COMPRA_EXECUTED", 0, 0, 0, 0, 0)
+            log_signal_event("TAKE_PROFIT", "COMPRA", live_price, current_sl, current_tp1, pnl, f"Salida en ganancia COMPRA (+${pnl:.2f} USD)")
             return build_response(
                 direction="ESPERA", confidence=95,
-                alert=f"🎯 TAKE PROFIT COMPRA LOGRADO (+${pnl:.2f} USD)",
+                alert=f"💰 SALIR EN GANANCIA COMPRA (+${pnl:.2f} USD)",
                 alert_type="TAKE_PROFIT",
-                alert_desc=f"Objetivo institucional alcanzado en {live_price:.2f}. Ganancia asegurada sin riesgo de reversión.",
+                alert_desc=f"El impulso desde {entry_p:.2f} alcanzó objetivo o detectó giro en M5 en {live_price:.2f}. Cierra y asegura tu ganancia ahora.",
                 entry_p=entry_p, sl=current_sl, tp1=current_tp1, tp2=current_tp2,
                 live_price=live_price, feed_source=feed_source, atr=atr,
                 confluences=confluences_audit, trendlines_data=trendlines_data,
                 fib_data=fib_data, heatmap_data=heatmap_data, ai_data=ai_strategy_data,
                 candles=candles_1m, is_locked=is_locked, lock_ts=truth_lock_ts,
                 support=support_val, resistance=resistance_val, room_up=room_up, room_down=room_down,
-                buy_score=buy_points, sell_score=sell_points, flip_reason="TP ejecutado con éxito"
+                buy_score=buy_points, sell_score=sell_points, flip_reason="TP / Ganancia asegurada",
+                m5_swing=m5_swing
             )
 
-        # Regla Anti-Ruido 3: Salida Estricta SOLO si cierra perforando el Stop Loss de Seguridad
-        if live_price <= current_sl and current_sl > 1000:
+        # Regla 3: Salida por Invalidación Estructural (CHoCH Bajista o SL tocado)
+        if (live_price <= current_sl and current_sl > 1000) or m5_sig == "SELL_CHOCH" or sell_points >= buy_points + 5:
             update_last_signal("ESPERA", "SL_COMPRA_EXECUTED", 0, 0, 0, 0, 0)
+            log_signal_event("EXIT", "COMPRA", live_price, current_sl, current_tp1, pnl, f"Salida de protección COMPRA ({pnl:+.2f} USD)")
             return build_response(
                 direction="ESPERA", confidence=90,
-                alert=f"🛑 STOP LOSS CONTROLADO COMPRA ({pnl:+.2f} USD)",
+                alert=f"🛑 SALIR DE COMPRA AHORA ({pnl:+.2f} USD)",
                 alert_type="EXIT",
-                alert_desc=f"Invalidación estructural tocada en {live_price:.2f}. Pérdida estrictamente acotada por riesgo institucional.",
+                alert_desc=f"La estructura alcista se invalidó en {live_price:.2f}. Cierra la compra de inmediato.",
                 entry_p=entry_p, sl=current_sl, tp1=current_tp1, tp2=current_tp2,
                 live_price=live_price, feed_source=feed_source, atr=atr,
                 confluences=confluences_audit, trendlines_data=trendlines_data,
                 fib_data=fib_data, heatmap_data=heatmap_data, ai_data=ai_strategy_data,
                 candles=candles_1m, is_locked=is_locked, lock_ts=truth_lock_ts,
                 support=support_val, resistance=resistance_val, room_up=room_up, room_down=room_down,
-                buy_score=buy_points, sell_score=sell_points, flip_reason="SL ejecutado"
+                buy_score=buy_points, sell_score=sell_points, flip_reason="Estructura invalidada",
+                m5_swing=m5_swing
             )
 
-        # Mantener COMPRA en curso
         final_dir = "COMPRA"
-        alert_text = f"🛡️ MANTENER COMPRA (+${pnl:.2f} USD)" if pnl >= 0 else f"🛡️ MANTENER COMPRA ({pnl:+.2f} USD)"
+        alert_text = f"🛡️ MANTENER COMPRA ({pnl:+.2f} USD)"
         alert_type = "ENTER"
-        alert_desc = f"Entrada en {entry_p:.2f} • SL dinámico en {current_sl:.2f} • Meta TP1 en {current_tp1:.2f}. Sin ruido prematuro."
-        flip_reason = f"Operación activa COMPRA ({pnl:+.2f} USD)"
-        confidence_score = 85
+        alert_desc = f"Entrada: ${entry_p:.2f} • SL: ${current_sl:.2f} • Meta TP1: ${current_tp1:.2f}. Estructura M5 alcista intacta."
+        flip_reason = f"En COMPRA ({pnl:+.2f} USD)"
+        confidence_score = 86
 
     # 2. Monitoreo de Operación VENTA ya abierta
     elif active_dir == "VENTA":
@@ -662,86 +860,91 @@ def analyze_market_trendspider(
             max_fav = live_price
             update_last_signal("VENTA", "HOLD_VENTA", entry_p, current_sl, current_tp1, current_tp2, max_fav)
 
-        if (entry_p - max_fav) >= (sl_distance * 0.9) and current_sl > entry_p:
-            current_sl = entry_p - 0.30
+        if (entry_p - max_fav) >= 2.00 and current_sl > entry_p:
+            current_sl = round(entry_p - 0.30, 2)
             update_last_signal("VENTA", "BREAK_EVEN_LOCKED", entry_p, current_sl, current_tp1, current_tp2, max_fav)
+            log_signal_event("BREAK_EVEN", "VENTA", live_price, current_sl, current_tp1, pnl, "Stop Loss movido a Break-Even (+0.30 USD asegurados)")
 
-        if live_price <= current_tp1 and current_tp1 > 1000:
+        if (live_price <= current_tp1 and current_tp1 > 1000) or (pnl >= 2.20 and m5_sig in ["BUY_REVERSAL", "BUY_PULLBACK"]):
             update_last_signal("ESPERA", "TP_VENTA_EXECUTED", 0, 0, 0, 0, 0)
+            log_signal_event("TAKE_PROFIT", "VENTA", live_price, current_sl, current_tp1, pnl, f"Salida en ganancia VENTA (+${pnl:.2f} USD)")
             return build_response(
                 direction="ESPERA", confidence=95,
-                alert=f"🎯 TAKE PROFIT VENTA LOGRADO (+${pnl:.2f} USD)",
+                alert=f"💰 SALIR EN GANANCIA VENTA (+${pnl:.2f} USD)",
                 alert_type="TAKE_PROFIT",
-                alert_desc=f"Objetivo institucional alcanzado en {live_price:.2f}. Ganancia asegurada sin riesgo de reversión.",
+                alert_desc=f"La caída desde {entry_p:.2f} alcanzó objetivo o detectó soporte fuerte M5 en {live_price:.2f}. Cierra y asegura tu ganancia.",
                 entry_p=entry_p, sl=current_sl, tp1=current_tp1, tp2=current_tp2,
                 live_price=live_price, feed_source=feed_source, atr=atr,
                 confluences=confluences_audit, trendlines_data=trendlines_data,
                 fib_data=fib_data, heatmap_data=heatmap_data, ai_data=ai_strategy_data,
                 candles=candles_1m, is_locked=is_locked, lock_ts=truth_lock_ts,
                 support=support_val, resistance=resistance_val, room_up=room_up, room_down=room_down,
-                buy_score=buy_points, sell_score=sell_points, flip_reason="TP ejecutado con éxito"
+                buy_score=buy_points, sell_score=sell_points, flip_reason="TP / Ganancia asegurada",
+                m5_swing=m5_swing
             )
 
-        if live_price >= current_sl and current_sl > 1000:
+        if (live_price >= current_sl and current_sl > 1000) or m5_sig == "BUY_REVERSAL" or buy_points >= sell_points + 5:
             update_last_signal("ESPERA", "SL_VENTA_EXECUTED", 0, 0, 0, 0, 0)
+            log_signal_event("EXIT", "VENTA", live_price, current_sl, current_tp1, pnl, f"Salida de protección VENTA ({pnl:+.2f} USD)")
             return build_response(
                 direction="ESPERA", confidence=90,
-                alert=f"🛑 STOP LOSS CONTROLADO VENTA ({pnl:+.2f} USD)",
+                alert=f"🛑 SALIR DE VENTA AHORA ({pnl:+.2f} USD)",
                 alert_type="EXIT",
-                alert_desc=f"Invalidación estructural tocada en {live_price:.2f}. Pérdida estrictamente acotada.",
+                alert_desc=f"La estructura bajista fue rota al alza en {live_price:.2f}. Cierra la venta de inmediato.",
                 entry_p=entry_p, sl=current_sl, tp1=current_tp1, tp2=current_tp2,
                 live_price=live_price, feed_source=feed_source, atr=atr,
                 confluences=confluences_audit, trendlines_data=trendlines_data,
                 fib_data=fib_data, heatmap_data=heatmap_data, ai_data=ai_strategy_data,
                 candles=candles_1m, is_locked=is_locked, lock_ts=truth_lock_ts,
                 support=support_val, resistance=resistance_val, room_up=room_up, room_down=room_down,
-                buy_score=buy_points, sell_score=sell_points, flip_reason="SL ejecutado"
+                buy_score=buy_points, sell_score=sell_points, flip_reason="Estructura invalidada",
+                m5_swing=m5_swing
             )
 
         final_dir = "VENTA"
-        alert_text = f"🛡️ MANTENER VENTA (+${pnl:.2f} USD)" if pnl >= 0 else f"🛡️ MANTENER VENTA ({pnl:+.2f} USD)"
+        alert_text = f"🛡️ MANTENER VENTA ({pnl:+.2f} USD)"
         alert_type = "ENTER"
-        alert_desc = f"Entrada en {entry_p:.2f} • SL dinámico en {current_sl:.2f} • Meta TP1 en {current_tp1:.2f}. Sin ruido prematuro."
-        flip_reason = f"Operación activa VENTA ({pnl:+.2f} USD)"
-        confidence_score = 85
+        alert_desc = f"Entrada: ${entry_p:.2f} • SL: ${current_sl:.2f} • Meta TP1: ${current_tp1:.2f}. Estructura M5 bajista intacta."
+        flip_reason = f"En VENTA ({pnl:+.2f} USD)"
+        confidence_score = 86
 
-    # 3. Disparo de NUEVA Entrada (Filtro Estricto de Confluencia)
+    # 3. Disparo de NUEVA Entrada (Aprovecha Impulso+Retroceso M5 o Confluencia TrendSpider)
     else:
-        # Requerimiento: Mínimo 7 puntos de confluencia Y ventaja neta de 4 sobre el lado contrario
-        # Y Probabilidad de IA >= 65% Y Espacio libre favorable
-        if buy_points >= 7 and buy_points >= sell_points + 4 and ai_buy_prob >= 0.62 and room_up >= 2.5:
+        if buy_points >= 5 and buy_points >= sell_points + 3:
             final_dir = "COMPRA"
             entry_p = live_price
             current_sl = round(live_price - sl_distance, 2)
             current_tp1 = round(live_price + tp1_distance, 2)
             current_tp2 = round(live_price + tp2_distance, 2)
-            confidence_score = min(96, int(72 + (buy_points * 2.5) + (ai_buy_prob * 15)))
-            alert_text = "🚀 ENTRADA COMPRA CONFIRMADA (TRENDSPIDER QUANT)"
+            confidence_score = min(96, int(74 + (buy_points * 2.2)))
+            alert_text = f"🚀 ENTRADA COMPRA CONFIRMADA ({m5_swing['structure']})"
             alert_type = "ENTER"
-            alert_desc = f"Confluencia cuádruple: Directriz Top 1% + Zona OTE + Bloque Heatmap + Probabilidad IA {ai_buy_prob*100:.0f}%."
-            flip_reason = f"Gatillo estructural verificado en {live_price:.2f}"
+            alert_desc = f"{m5_swing['reason']} • Confluencia: {buy_points} pts a favor."
+            flip_reason = f"Nueva COMPRA en ${live_price:.2f}"
             update_last_signal("COMPRA", "NEW_ENTRY", entry_p, current_sl, current_tp1, current_tp2, entry_p)
+            log_signal_event("ENTER", "COMPRA", entry_p, current_sl, current_tp1, 0.0, m5_swing["structure"] + ": " + m5_swing["reason"])
 
-        elif sell_points >= 7 and sell_points >= buy_points + 4 and ai_sell_prob >= 0.62 and room_down >= 2.5:
+        elif sell_points >= 5 and sell_points >= buy_points + 3:
             final_dir = "VENTA"
             entry_p = live_price
             current_sl = round(live_price + sl_distance, 2)
             current_tp1 = round(live_price - tp1_distance, 2)
             current_tp2 = round(live_price - tp2_distance, 2)
-            confidence_score = min(96, int(72 + (sell_points * 2.5) + (ai_sell_prob * 15)))
-            alert_text = "📉 ENTRADA VENTA CONFIRMADA (TRENDSPIDER QUANT)"
+            confidence_score = min(96, int(74 + (sell_points * 2.2)))
+            alert_text = f"📉 ENTRADA VENTA CONFIRMADA ({m5_swing['structure']})"
             alert_type = "ENTER"
-            alert_desc = f"Confluencia cuádruple: Directriz Top 1% + Zona OTE + Barrera Heatmap + Probabilidad IA {ai_sell_prob*100:.0f}%."
-            flip_reason = f"Gatillo estructural verificado en {live_price:.2f}"
+            alert_desc = f"{m5_swing['reason']} • Confluencia: {sell_points} pts a favor."
+            flip_reason = f"Nueva VENTA en ${live_price:.2f}"
             update_last_signal("VENTA", "NEW_ENTRY", entry_p, current_sl, current_tp1, current_tp2, entry_p)
+            log_signal_event("ENTER", "VENTA", entry_p, current_sl, current_tp1, 0.0, m5_swing["structure"] + ": " + m5_swing["reason"])
 
         else:
             final_dir = "ESPERA"
-            confidence_score = 50
-            alert_text = "⏸ FILTRO ANTI-RUIDO ACTIVO (ESPERANDO CONFLUENCIA)"
+            confidence_score = 55
+            alert_text = f"⏸ ESPERA • {m5_swing['structure']}"
             alert_type = "WAIT"
-            alert_desc = f"Puntajes: Compra {buy_points} pts / Venta {sell_points} pts. Probabilidad IA {ai_confidence}%. El algoritmo no toma operaciones mediocres."
-            flip_reason = "Protegiendo capital sin ruido"
+            alert_desc = f"{m5_swing['reason']} (Puntos: Compra {buy_points} / Venta {sell_points}). Esperando vela de giro en Fibonacci o ruptura."
+            flip_reason = "Esperando fin de retroceso"
 
     return build_response(
         direction=final_dir, confidence=confidence_score,
@@ -755,7 +958,8 @@ def analyze_market_trendspider(
         fib_data=fib_data, heatmap_data=heatmap_data, ai_data=ai_strategy_data,
         candles=candles_1m, is_locked=is_locked, lock_ts=truth_lock_ts,
         support=support_val, resistance=resistance_val, room_up=room_up, room_down=room_down,
-        buy_score=buy_points, sell_score=sell_points, flip_reason=flip_reason
+        buy_score=buy_points, sell_score=sell_points, flip_reason=flip_reason,
+        m5_swing=m5_swing
     )
 
 def build_response(
@@ -766,7 +970,8 @@ def build_response(
     fib_data: Dict[str, Any], heatmap_data: Dict[str, Any], ai_data: Dict[str, Any],
     candles: List[Dict[str, Any]], is_locked: bool, lock_ts: Optional[str],
     support: float, resistance: float, room_up: float, room_down: float,
-    buy_score: int, sell_score: int, flip_reason: str
+    buy_score: int, sell_score: int, flip_reason: str,
+    m5_swing: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     return {
         "symbol": "XAUUSD",
@@ -775,8 +980,8 @@ def build_response(
         "sl": round(sl, 2),
         "tp1": round(tp1, 2),
         "tp2": round(tp2, 2),
-        "dist": round(abs(entry_p - sl), 2) if sl > 0 else round(atr * 1.3, 2),
-        "tp_dist": round(abs(tp1 - entry_p), 2) if tp1 > 0 else round(atr * 2.0, 2),
+        "dist": round(abs(entry_p - sl), 2) if sl > 0 else round(atr * 1.4, 2),
+        "tp_dist": round(abs(tp1 - entry_p), 2) if tp1 > 0 else round(atr * 2.2, 2),
         "live_price": round(live_price, 2),
         "feed_source": feed_source,
         "confidence": confidence,
@@ -792,6 +997,8 @@ def build_response(
         "buy_score": buy_score,
         "sell_score": sell_score,
         "points_detail": confluences,
+        "m5_structure": m5_swing or {},
+        "signal_history": get_signal_history(20),
         "trendlines": trendlines_data.get("active_lines", []),
         "top_trendline_score": trendlines_data.get("top_score", 0.0),
         "total_candidate_vectors": trendlines_data.get("total_candidates", 0),
@@ -803,7 +1010,7 @@ def build_response(
             "lock_ts": lock_ts,
             "status": "LOCKED (OUT-OF-SAMPLE TEST)" if is_locked else "UNLOCKED (DYNAMIC LIVE RECALC)"
         },
-        "recent_candles": candles[-40:] if len(candles) >= 40 else candles,
+        "recent_candles": candles[-45:] if len(candles) >= 45 else candles,
         "timestamp": datetime.now(EC_TZ).isoformat()
     }
 
@@ -814,21 +1021,17 @@ def build_response(
 @app.get("/")
 def root():
     return {
-        "message": "EDGEALERT - TRENDSPIDER ALGORITHMIC ENGINE v15.0",
-        "version": "15.0",
-        "architecture": [
-            "Auto-Trendlines (Computational Geometry & Scoring Engine)",
-            "Auto-Fibonacci (Dynamic Retracement & Golden Zone OTE)",
-            "Liquidity Heatmaps 40x60 (Horizontal, Depth Diffusion & Trends)",
-            "Truth in Analysis (Anti-Repainting Timestamp)",
-            "AI Strategy Lab (Supervised Classifiers, Ensemble & Target Labeling)",
-            "MTFA & Dynamic Alerts with ATR Touch Cushion"
-        ]
+        "message": "EDGEALERT - TRENDSPIDER ALGORITHMIC ENGINE v15.5",
+        "version": "15.5"
     }
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "symbol": "XAUUSD", "version": "15.0"}
+    return {"status": "ok", "symbol": "XAUUSD", "version": "15.5"}
+
+@app.get("/signals/history")
+def signals_history_endpoint():
+    return get_signal_history(30)
 
 @app.get("/signals/live")
 def signals_live(
@@ -864,11 +1067,8 @@ def signals_live(
             "symbol": "XAUUSD",
             "direction": "ESPERA",
             "entry": p,
-            "sl": 0,
-            "tp1": 0,
-            "tp2": 0,
-            "dist": 3.0,
-            "tp_dist": 4.5,
+            "sl": 0, "tp1": 0, "tp2": 0,
+            "dist": 2.8, "tp_dist": 4.5,
             "live_price": p,
             "feed_source": "RECOVERY",
             "confidence": 50,
@@ -876,6 +1076,7 @@ def signals_live(
             "alert_type": "WAIT",
             "alert_desc": str(e),
             "points_detail": [],
+            "signal_history": get_signal_history(20),
             "flip_reason": "Recalibrando motores de geometría",
             "support": p - 4,
             "resistance": p + 4,
@@ -904,10 +1105,6 @@ def update_settings(payload: SettingsPayload):
 
 @app.post("/webhook/tradingview")
 async def tradingview_webhook(request: Request):
-    """
-    Webhook sin Lag de TrendSpider / TradingView.
-    Al cumplirse una alerta en la nube dispara payload JSON instantáneo.
-    """
     try:
         data = await request.json()
         cl = float(data.get("close") or data.get("price") or 0)
@@ -937,6 +1134,8 @@ async def startup_event():
             try:
                 p, _ = get_live_spot_price()
                 update_current_1m_candle(p, "FEED")
+                # Ejecutar análisis en segundo plano cada 8s para que guarde todas las alertas aunque el navegador esté cerrado
+                analyze_market_trendspider()
                 ticks += 1
                 if ticks % 40 == 0:
                     sync_historical_1m_candles()

@@ -1,32 +1,102 @@
 "use client";
-import React, { useEffect, useState, useRef, useMemo } from "react";
+import React, { useEffect, useState, useRef } from "react";
 
 const DEFAULT_API = process.env.NEXT_PUBLIC_API_URL || "https://trading-app-jn5a.onrender.com";
+
+// ==============================================================================
+// MOTOR DE AUDIO SINTETIZADO (WEB AUDIO API + VOZ EN ESPAÑOL)
+// ==============================================================================
+function playAlertSound(type = "BUY", voiceMessage = "") {
+  if (typeof window === "undefined") return;
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (AudioCtx) {
+      const ctx = new AudioCtx();
+      const now = ctx.currentTime;
+
+      const makeTone = (freq, start, duration, wave = "sine", gainVal = 0.25) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = wave;
+        osc.frequency.setValueAtTime(freq, start);
+        gain.gain.setValueAtTime(gainVal, start);
+        gain.gain.exponentialRampToValueAtTime(0.001, start + duration);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(start);
+        osc.stop(start + duration);
+      };
+
+      if (type === "BUY") {
+        // Acorde ascendente institucional de Compra
+        makeTone(523.25, now, 0.16, "triangle", 0.3);       // C5
+        makeTone(659.25, now + 0.14, 0.16, "triangle", 0.3); // E5
+        makeTone(783.99, now + 0.28, 0.22, "triangle", 0.3); // G5
+        makeTone(1046.5, now + 0.44, 0.45, "sine", 0.35);    // C6
+      } else if (type === "SELL") {
+        // Acorde descendente firme de Venta
+        makeTone(880.0, now, 0.16, "sawtooth", 0.25);        // A5
+        makeTone(698.46, now + 0.15, 0.16, "sawtooth", 0.25);// F5
+        makeTone(587.33, now + 0.30, 0.18, "sawtooth", 0.25);// D5
+        makeTone(440.0, now + 0.46, 0.45, "triangle", 0.3);  // A4
+      } else if (type === "TAKE_PROFIT") {
+        // Fanfarria dorada de Take Profit / Ganancia
+        makeTone(587.33, now, 0.12, "sine", 0.3);
+        makeTone(783.99, now + 0.12, 0.12, "sine", 0.3);
+        makeTone(987.77, now + 0.24, 0.15, "sine", 0.3);
+        makeTone(1174.66, now + 0.38, 0.55, "triangle", 0.35);
+      } else if (type === "EXIT") {
+        // Doble alarma urgente de Salida / Protección
+        makeTone(320.0, now, 0.22, "sawtooth", 0.35);
+        makeTone(260.0, now + 0.25, 0.22, "sawtooth", 0.35);
+        makeTone(320.0, now + 0.50, 0.35, "sawtooth", 0.35);
+      }
+    }
+
+    // Síntesis de Voz en Español (TTS)
+    if (voiceMessage && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(voiceMessage);
+      utterance.lang = "es-ES";
+      utterance.rate = 1.05;
+      utterance.pitch = 1.0;
+      setTimeout(() => {
+        window.speechSynthesis.speak(utterance);
+      }, 650);
+    }
+  } catch (err) {
+    console.warn("Audio warning:", err);
+  }
+}
 
 export default function TrendSpiderPage() {
   const [signal, setSignal] = useState(null);
   const [loading, setLoading] = useState(true);
   const [timeEc, setTimeEc] = useState("");
-  const [backendStatus, setBackendStatus] = useState("Conectando con motor TrendSpider v15.0...");
+  const [backendStatus, setBackendStatus] = useState("Conectando con motor TrendSpider v15.5...");
   const [customApi, setCustomApi] = useState(DEFAULT_API);
 
+  // Control de Alertas Sonoras
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const lastAlertRef = useRef({ direction: null, alertType: null, alertText: null });
+
   // Parámetros de Control TrendSpider
-  const [analysisType, setAnalysisType] = useState("Standard");       // "Original", "Standard", "Enhanced"
-  const [drawingInput, setDrawingInput] = useState("Wick");           // "Wick", "Body"
-  const [islandGaps, setIslandGaps] = useState("Respect");            // "Respect", "Ignore"
-  const [qualityFilter, setQualityFilter] = useState("Most Relevant");// "Most Relevant", "Moderately Relevant", "Unfiltered"
-  const [heatmapMode, setHeatmapMode] = useState("Horizontal");       // "Horizontal", "Depth", "Trends", "Off"
+  const [analysisType, setAnalysisType] = useState("Standard");
+  const [drawingInput, setDrawingInput] = useState("Wick");
+  const [islandGaps, setIslandGaps] = useState("Respect");
+  const [qualityFilter, setQualityFilter] = useState("Most Relevant");
+  const [heatmapMode, setHeatmapMode] = useState("Horizontal");
   const [truthLocked, setTruthLocked] = useState(false);
   const [lockTimestamp, setLockTimestamp] = useState("");
 
   // AI Strategy Lab
-  const [aiModel, setAiModel] = useState("Ensemble");                 // "Ensemble", "RandomForest", "Logistic", "KNN", "NaiveBayes"
-  const [tpPct, setTpPct] = useState(0.14);
-  const [slPct, setSlPct] = useState(0.08);
+  const [aiModel, setAiModel] = useState("Ensemble");
+  const [tpPct, setTpPct] = useState(0.10);
+  const [slPct, setSlPct] = useState(0.06);
   const [horizon, setHorizon] = useState(30);
 
   // Pestaña visual activa
-  const [activeTab, setActiveTab] = useState("chart"); // "chart", "strategy_lab", "heatmap", "audit"
+  const [activeTab, setActiveTab] = useState("chart"); // "chart", "history", "strategy_lab", "audit"
 
   const fetchData = async () => {
     try {
@@ -43,12 +113,10 @@ export default function TrendSpiderPage() {
         truth_lock_ts: truthLocked && lockTimestamp ? String(lockTimestamp) : ""
       });
 
-      // Intentar primero con la URL configurada
       let res;
       try {
         res = await fetch(`${customApi}/signals/live?${queryParams.toString()}`, { cache: "no-store" });
       } catch (err) {
-        // Fallback automático a localhost si customApi falla o viceversa
         const altUrl = customApi.includes("localhost") ? DEFAULT_API : "http://localhost:8000";
         res = await fetch(`${altUrl}/signals/live?${queryParams.toString()}`, { cache: "no-store" });
         setCustomApi(altUrl);
@@ -59,12 +127,50 @@ export default function TrendSpiderPage() {
       const sig = Array.isArray(data) && data.length > 0 ? data[0] : data.symbol ? data : null;
 
       if (sig && sig.symbol?.includes("XAU")) {
-        setSignal(sig);
-        setBackendStatus(`En Línea • ${sig.feed_source || "Spot Institucional"} • TrendSpider v15.0`);
-        if (sig.truth_in_analysis?.locked && !lockTimestamp) {
-          setLockTimestamp(sig.truth_in_analysis.lock_ts);
-          setTruthLocked(true);
+        // Evaluar disparo de Alerta Sonora cuando hay transición de estado
+        const prev = lastAlertRef.current;
+        const currDir = sig.direction;
+        const currType = sig.alert_type;
+
+        if (prev.direction !== null && soundEnabled) {
+          // 1. Nueva Entrada en COMPRA
+          if (currDir === "COMPRA" && prev.direction !== "COMPRA") {
+            playAlertSound(
+              "BUY",
+              `Atención. Entrada de compra confirmada en oro a ${sig.live_price?.toFixed(0)} dólares. Stop loss en ${sig.sl?.toFixed(0)} y Take Profit en ${sig.tp1?.toFixed(0)}.`
+            );
+          }
+          // 2. Nueva Entrada en VENTA
+          else if (currDir === "VENTA" && prev.direction !== "VENTA") {
+            playAlertSound(
+              "SELL",
+              `Atención. Entrada de venta confirmada en oro a ${sig.live_price?.toFixed(0)} dólares. Stop loss en ${sig.sl?.toFixed(0)} y Take Profit en ${sig.tp1?.toFixed(0)}.`
+            );
+          }
+          // 3. Salida en Ganancia (Take Profit)
+          else if (currType === "TAKE_PROFIT" && prev.alertType !== "TAKE_PROFIT") {
+            playAlertSound(
+              "TAKE_PROFIT",
+              `Objetivo alcanzado. Salir en ganancia ahora mismo en ${sig.live_price?.toFixed(0)} dólares.`
+            );
+          }
+          // 4. Salida por Protección / Stop Loss / Giro Estructural
+          else if (currType === "EXIT" && prev.alertType !== "EXIT") {
+            playAlertSound(
+              "EXIT",
+              `Alerta de protección. Estructura invalidada. Cerrar operación ahora en ${sig.live_price?.toFixed(0)} dólares.`
+            );
+          }
         }
+
+        lastAlertRef.current = {
+          direction: currDir,
+          alertType: currType,
+          alertText: sig.alert
+        };
+
+        setSignal(sig);
+        setBackendStatus(`En Línea • ${sig.feed_source || "Spot Institucional"} • TrendSpider v15.5`);
       } else {
         throw new Error("Datos incompletos");
       }
@@ -95,9 +201,8 @@ export default function TrendSpiderPage() {
       clearInterval(fetchInterval);
       clearInterval(clockInterval);
     };
-  }, [analysisType, drawingInput, islandGaps, qualityFilter, heatmapMode, aiModel, tpPct, slPct, horizon, truthLocked, lockTimestamp, customApi]);
+  }, [analysisType, drawingInput, islandGaps, qualityFilter, heatmapMode, aiModel, tpPct, slPct, horizon, truthLocked, lockTimestamp, customApi, soundEnabled]);
 
-  // Manejador de bloqueo / desbloqueo de "Truth in Analysis"
   const toggleTruthLock = () => {
     if (truthLocked) {
       setTruthLocked(false);
@@ -133,10 +238,10 @@ export default function TrendSpiderPage() {
           marginBottom: "16px"
         }} />
         <div style={{ fontSize: "17px", fontWeight: "800", color: "#f8fafc" }}>
-          Iniciando Algoritmo TrendSpider Quant v15.0...
+          Iniciando Algoritmo TrendSpider Quant v15.5...
         </div>
         <div style={{ fontSize: "12px", color: "#94a3b8", marginTop: "6px" }}>
-          Calibrando matrices de geometría computacional, Auto-Fibs y Strategy Lab...
+          Sincronizando estructuras M5 (Impulso y Retroceso), Auto-Fibs y Alertas Sonoras...
         </div>
         <style>{`@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }`}</style>
       </div>
@@ -163,6 +268,8 @@ export default function TrendSpiderPage() {
   const ai = s.ai_strategy || {};
   const candles = s.recent_candles || [];
   const pointsDetail = s.points_detail || [];
+  const signalHistory = s.signal_history || [];
+  const m5Struct = s.m5_structure || {};
 
   return (
     <div style={{
@@ -175,14 +282,14 @@ export default function TrendSpiderPage() {
       <div style={{ maxWidth: "1150px", margin: "0 auto" }}>
 
         {/* ============================================================== */}
-        {/* CABECERA INSTITUCIONAL TRENDSPIDER QUANT */}
+        {/* CABECERA INSTITUCIONAL + CONTROL DE ALERTA SONORA */}
         {/* ============================================================== */}
         <header style={{
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
           flexWrap: "wrap",
-          gap: "14px",
+          gap: "12px",
           borderBottom: "1px solid #1e2430",
           paddingBottom: "14px",
           marginBottom: "14px"
@@ -195,7 +302,7 @@ export default function TrendSpiderPage() {
                 boxShadow: `0 0 10px ${truthLocked ? "#eab308" : "#22c55e"}`
               }} />
               <h1 style={{ fontSize: "21px", fontWeight: "900", margin: 0, letterSpacing: "-0.5px" }}>
-                EDGEALERT <span style={{ color: "#f59e0b" }}>TRENDSPIDER</span> <span style={{ fontSize: "12px", color: "#64748b", fontWeight: "600" }}>v15.0 QUANT</span>
+                EDGEALERT <span style={{ color: "#f59e0b" }}>TRENDSPIDER</span> <span style={{ fontSize: "12px", color: "#64748b", fontWeight: "600" }}>v15.5 M5+AUDIO</span>
               </h1>
             </div>
             <div style={{ fontSize: "11px", color: "#94a3b8", marginTop: "3px" }}>
@@ -204,23 +311,65 @@ export default function TrendSpiderPage() {
             <div style={{ fontSize: "12px", color: "#38bdf8", fontWeight: "700", marginTop: "4px" }}>
               XAU/USD SPOT: <span style={{ color: "#fff", fontSize: "15px", fontWeight: "900" }}>${s.live_price?.toFixed(2)}</span>
               <span style={{ color: "#64748b", marginLeft: "8px" }}>| ATR(14): ${s.atr?.toFixed(2)}</span>
-              <span style={{ color: "#f59e0b", marginLeft: "8px" }}>| Vectores Analizados: {s.total_candidate_vectors || 0}</span>
+              <span style={{ color: "#f59e0b", marginLeft: "8px" }}>| Estructura M5: {m5Struct.structure || "Activa"}</span>
             </div>
           </div>
 
-          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          {/* Botones de Audio y Estado */}
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+            <button
+              onClick={() => {
+                const nextState = !soundEnabled;
+                setSoundEnabled(nextState);
+                if (nextState) {
+                  playAlertSound("BUY", "Alertas sonoras de entrada y salida activadas.");
+                }
+              }}
+              style={{
+                background: soundEnabled ? "rgba(34, 197, 94, 0.18)" : "#1e293b",
+                color: soundEnabled ? "#4ade80" : "#94a3b8",
+                border: `1px solid ${soundEnabled ? "#22c55e" : "#475569"}`,
+                borderRadius: "8px",
+                padding: "8px 12px",
+                fontSize: "11px",
+                fontWeight: "800",
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                gap: "6px"
+              }}
+            >
+              {soundEnabled ? "🔊 AUDIO ACTIVO (Voz + Alarma)" : "🔇 AUDIO SILENCIADO"}
+            </button>
+
+            <button
+              onClick={() => playAlertSound("TAKE_PROFIT", "Prueba de sonido. El sistema avisará por voz cada entrada y salida.")}
+              style={{
+                background: "#1e293b",
+                color: "#facc15",
+                border: "1px solid #f59e0b",
+                borderRadius: "8px",
+                padding: "8px 12px",
+                fontSize: "11px",
+                fontWeight: "800",
+                cursor: "pointer"
+              }}
+            >
+              🔔 PROBAR SONIDO
+            </button>
+
             <div style={{
-              padding: "10px 20px",
+              padding: "8px 18px",
               borderRadius: "10px",
               background: isBuy ? "rgba(34,197,94,0.18)" : isSell ? "rgba(239,68,68,0.18)" : "rgba(39,39,42,0.7)",
               border: `2px solid ${isBuy ? "#22c55e" : isSell ? "#ef4444" : "#71717a"}`,
               color: isBuy ? "#4ade80" : isSell ? "#f87171" : "#e4e4e7",
               textAlign: "center"
             }}>
-              <div style={{ fontSize: "16px", fontWeight: "900", letterSpacing: "1px" }}>
+              <div style={{ fontSize: "15px", fontWeight: "900", letterSpacing: "1px" }}>
                 {s.direction} {isBuy ? "▲" : isSell ? "▼" : "⏸"}
               </div>
-              <div style={{ fontSize: "10px", opacity: 0.85, marginTop: "2px" }}>
+              <div style={{ fontSize: "10px", opacity: 0.85 }}>
                 Confianza: {s.confidence}%
               </div>
             </div>
@@ -241,10 +390,9 @@ export default function TrendSpiderPage() {
           gap: "10px",
           fontSize: "11px"
         }}>
-          {/* Analysis Type */}
           <div>
             <label style={{ color: "#94a3b8", display: "block", marginBottom: "4px", fontWeight: "700" }}>
-              1. SENSIVILIDAD VENTANA
+              1. SENSIBILIDAD VENTANA
             </label>
             <select
               value={analysisType}
@@ -254,13 +402,12 @@ export default function TrendSpiderPage() {
                 borderRadius: "6px", padding: "6px 8px", fontSize: "11px", fontWeight: "600", outline: "none"
               }}
             >
-              <option value="Standard">Standard (Equilibrado)</option>
-              <option value="Original">Original (Macro / Filtra Ruido)</option>
-              <option value="Enhanced">Enhanced (Micro / Scalping)</option>
+              <option value="Standard">Standard (Impulso + Retroceso M5)</option>
+              <option value="Original">Original (Macro / Tendencias Largas)</option>
+              <option value="Enhanced">Enhanced (Micro / Scalping Rápido)</option>
             </select>
           </div>
 
-          {/* Drawing Input */}
           <div>
             <label style={{ color: "#94a3b8", display: "block", marginBottom: "4px", fontWeight: "700" }}>
               2. ANCLAJE DE VELA
@@ -278,7 +425,6 @@ export default function TrendSpiderPage() {
             </select>
           </div>
 
-          {/* Island Gaps */}
           <div>
             <label style={{ color: "#94a3b8", display: "block", marginBottom: "4px", fontWeight: "700" }}>
               3. GAPS (3x ATR)
@@ -296,7 +442,6 @@ export default function TrendSpiderPage() {
             </select>
           </div>
 
-          {/* Quality Filter */}
           <div>
             <label style={{ color: "#94a3b8", display: "block", marginBottom: "4px", fontWeight: "700" }}>
               4. FILTRO DE CALIDAD
@@ -315,7 +460,6 @@ export default function TrendSpiderPage() {
             </select>
           </div>
 
-          {/* Heatmap Mode */}
           <div>
             <label style={{ color: "#94a3b8", display: "block", marginBottom: "4px", fontWeight: "700" }}>
               5. MAPA DE CALOR 40x60
@@ -335,7 +479,6 @@ export default function TrendSpiderPage() {
             </select>
           </div>
 
-          {/* Truth in Analysis Lock Toggle */}
           <div>
             <label style={{ color: "#94a3b8", display: "block", marginBottom: "4px", fontWeight: "700" }}>
               6. TRUTH IN ANALYSIS
@@ -351,8 +494,7 @@ export default function TrendSpiderPage() {
                 padding: "6px 8px",
                 fontSize: "11px",
                 fontWeight: "800",
-                cursor: "pointer",
-                transition: "all 0.2s"
+                cursor: "pointer"
               }}
             >
               {truthLocked ? "🟡 BLOQUEADO (OOS Test)" : "🔴 DESBLOQUEADO (En Vivo)"}
@@ -383,7 +525,6 @@ export default function TrendSpiderPage() {
             {s.alert_desc}
           </div>
 
-          {/* Tarjetas Cuánticas */}
           <div style={{
             display: "grid",
             gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))",
@@ -398,37 +539,37 @@ export default function TrendSpiderPage() {
             </div>
 
             <div style={{ background: "rgba(0,0,0,0.45)", borderRadius: "8px", padding: "8px 10px", border: "1px solid #1e293b", textAlign: "center" }}>
-              <div style={{ fontSize: "10px", color: "#94a3b8", fontWeight: "700" }}>IA ({s.ai_strategy?.active_model || "Ensemble"})</div>
-              <div style={{ fontSize: "16px", fontWeight: "900", marginTop: "2px", color: (s.ai_strategy?.buy_prob || 0.5) >= 0.65 ? "#4ade80" : (s.ai_strategy?.sell_prob || 0.5) >= 0.65 ? "#f87171" : "#38bdf8" }}>
-                {((s.ai_strategy?.buy_prob || 0.5) >= (s.ai_strategy?.sell_prob || 0.5) ? s.ai_strategy?.buy_prob : s.ai_strategy?.sell_prob) * 100}%
-              </div>
-            </div>
-
-            <div style={{ background: "rgba(0,0,0,0.45)", borderRadius: "8px", padding: "8px 10px", border: "1px solid #1e293b", textAlign: "center" }}>
-              <div style={{ fontSize: "10px", color: "#94a3b8", fontWeight: "700" }}>ESPACIO ARRIBA</div>
-              <div style={{ fontSize: "16px", fontWeight: "900", marginTop: "2px", color: (s.room_up || 0) < 2.5 ? "#f87171" : "#4ade80" }}>
-                +${s.room_up?.toFixed(2)}
-              </div>
-            </div>
-
-            <div style={{ background: "rgba(0,0,0,0.45)", borderRadius: "8px", padding: "8px 10px", border: "1px solid #1e293b", textAlign: "center" }}>
-              <div style={{ fontSize: "10px", color: "#94a3b8", fontWeight: "700" }}>ESPACIO ABAJO</div>
-              <div style={{ fontSize: "16px", fontWeight: "900", marginTop: "2px", color: (s.room_down || 0) < 2.5 ? "#f87171" : "#4ade80" }}>
-                -${s.room_down?.toFixed(2)}
-              </div>
-            </div>
-
-            <div style={{ background: "rgba(0,0,0,0.45)", borderRadius: "8px", padding: "8px 10px", border: "1px solid #1e293b", textAlign: "center" }}>
-              <div style={{ fontSize: "10px", color: "#94a3b8", fontWeight: "700" }}>WIN RATE SIMULADO</div>
+              <div style={{ fontSize: "10px", color: "#94a3b8", fontWeight: "700" }}>RETROCESO FIB M5</div>
               <div style={{ fontSize: "16px", fontWeight: "900", marginTop: "2px", color: "#facc15" }}>
-                {s.ai_strategy?.metrics?.win_rate || 68}%
+                {((m5Struct.fib_ret || 0.5) * 100).toFixed(0)}%
+              </div>
+            </div>
+
+            <div style={{ background: "rgba(0,0,0,0.45)", borderRadius: "8px", padding: "8px 10px", border: "1px solid #1e293b", textAlign: "center" }}>
+              <div style={{ fontSize: "10px", color: "#94a3b8", fontWeight: "700" }}>TECHO M5 / RESISTENCIA</div>
+              <div style={{ fontSize: "15px", fontWeight: "900", marginTop: "2px", color: "#f87171" }}>
+                ${s.resistance?.toFixed(2)} (+${s.room_up?.toFixed(1)})
+              </div>
+            </div>
+
+            <div style={{ background: "rgba(0,0,0,0.45)", borderRadius: "8px", padding: "8px 10px", border: "1px solid #1e293b", textAlign: "center" }}>
+              <div style={{ fontSize: "10px", color: "#94a3b8", fontWeight: "700" }}>PISO M5 / SOPORTE</div>
+              <div style={{ fontSize: "15px", fontWeight: "900", marginTop: "2px", color: "#4ade80" }}>
+                ${s.support?.toFixed(2)} (-${s.room_down?.toFixed(1)})
+              </div>
+            </div>
+
+            <div style={{ background: "rgba(0,0,0,0.45)", borderRadius: "8px", padding: "8px 10px", border: "1px solid #1e293b", textAlign: "center" }}>
+              <div style={{ fontSize: "10px", color: "#94a3b8", fontWeight: "700" }}>ALERTAS HOY</div>
+              <div style={{ fontSize: "16px", fontWeight: "900", marginTop: "2px", color: "#38bdf8" }}>
+                {signalHistory.length} registradas
               </div>
             </div>
           </div>
         </section>
 
         {/* ============================================================== */}
-        {/* PARÁMETROS DE EJECUCIÓN (CUANDO NO ESTÁ EN ESPERA) */}
+        {/* PARÁMETROS DE EJECUCIÓN (CUANDO HAY OPERACIÓN ACTIVA) */}
         {/* ============================================================== */}
         {!isWait && (
           <section style={{
@@ -446,11 +587,11 @@ export default function TrendSpiderPage() {
               <span style={{ fontWeight: "900", color: "#fff", fontSize: "15px" }}>${s.entry?.toFixed(2)}</span>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", color: "#f87171", marginBottom: "6px" }}>
-              <span>STOP LOSS ESTRUCTURAL DINÁMICO (Riesgo ${s.dist?.toFixed(2)}):</span>
+              <span>STOP LOSS DE SEGURIDAD (Riesgo ${s.dist?.toFixed(2)}):</span>
               <span style={{ fontWeight: "800" }}>${s.sl?.toFixed(2)}</span>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", color: "#34d399", marginBottom: "6px" }}>
-              <span>TAKE PROFIT 1 - ZONA FIB/HEATMAP (+${s.tp_dist?.toFixed(2)}):</span>
+              <span>TAKE PROFIT 1 - OBJETIVO IMPULSO (+${s.tp_dist?.toFixed(2)}):</span>
               <span style={{ fontWeight: "800" }}>${s.tp1?.toFixed(2)}</span>
             </div>
             {s.tp2 > 0 && (
@@ -465,11 +606,12 @@ export default function TrendSpiderPage() {
         {/* ============================================================== */}
         {/* PESTAÑAS DE VISUALIZACIÓN */}
         {/* ============================================================== */}
-        <div style={{ display: "flex", gap: "6px", marginBottom: "12px", borderBottom: "1px solid #1e2638", paddingBottom: "6px" }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "12px", borderBottom: "1px solid #1e2638", paddingBottom: "6px" }}>
           {[
-            { id: "chart", label: "GRÁFICO VECTORIAL TRENDSPIDER" },
-            { id: "strategy_lab", label: "AI STRATEGY LAB (ML)" },
-            { id: "audit", label: "AUDITORÍA DE CONFLUENCIAS" }
+            { id: "chart", label: "📊 GRÁFICO VECTORIAL TRENDSPIDER" },
+            { id: "history", label: `🕒 BITÁCORA DE ALERTAS (${signalHistory.length})` },
+            { id: "strategy_lab", label: "🧬 AI STRATEGY LAB (ML)" },
+            { id: "audit", label: "🛡️ AUDITORÍA DE CONFLUENCIAS" }
           ].map((tab) => (
             <button
               key={tab.id}
@@ -501,16 +643,15 @@ export default function TrendSpiderPage() {
             padding: "14px",
             marginBottom: "14px"
           }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px", flexWrap: "wrap", gap: "6px" }}>
               <div style={{ fontSize: "12px", fontWeight: "800", color: "#f8fafc" }}>
-                Velas M1 + Vectores Auto-Trendlines (Top 1%) + Retracción Fibonacci + Matriz 40x60
+                Estructura Impulso/Retroceso + Vectores Auto-Trendlines + Zona Dorada Fibonacci (0.382 - 0.618)
               </div>
               <div style={{ fontSize: "10px", color: "#94a3b8" }}>
                 Líneas activas: <b style={{ color: "#38bdf8" }}>{trendlines.length}</b> • Zona Dorada: <b style={{ color: "#facc15" }}>0.382 - 0.618 OTE</b>
               </div>
             </div>
 
-            {/* Canvas SVG de Velas y Vectores */}
             <TrendSpiderChartCanvas
               candles={candles}
               trendlines={trendlines}
@@ -520,35 +661,99 @@ export default function TrendSpiderPage() {
               truthLocked={truthLocked}
               lockTimestamp={lockTimestamp}
             />
+          </section>
+        )}
 
-            {/* Leyenda del Gráfico */}
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "14px", marginTop: "10px", fontSize: "10px", color: "#94a3b8" }}>
-              <span style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-                <span style={{ width: "12px", height: "3px", background: "#38bdf8", display: "inline-block" }} />
-                Directriz de Resistencia
-              </span>
-              <span style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-                <span style={{ width: "12px", height: "3px", background: "#4ade80", display: "inline-block" }} />
-                Directriz de Soporte
-              </span>
-              <span style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-                <span style={{ width: "12px", height: "8px", background: "rgba(234, 179, 8, 0.25)", border: "1px solid #eab308", display: "inline-block" }} />
-                Zona Dorada Fibonacci (Full Mid)
-              </span>
-              <span style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-                <span style={{ width: "12px", height: "3px", background: truthLocked ? "#eab308" : "#ef4444", display: "inline-block" }} />
-                Truth in Analysis Line
-              </span>
-              <span style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-                <span style={{ width: "8px", height: "8px", borderRadius: "50%", background: "#22c55e", display: "inline-block" }} />
-                Ruptura Confirmada (Breakout al Cierre)
-              </span>
+        {/* ============================================================== */}
+        {/* CONTENIDO 2: BITÁCORA HISTÓRICA DE ALERTAS (VERIFICACIÓN 8AM-11AM) */}
+        {/* ============================================================== */}
+        {activeTab === "history" && (
+          <section style={{
+            background: "#0c0f17",
+            border: "1px solid #1e2638",
+            borderRadius: "12px",
+            padding: "16px",
+            marginBottom: "14px"
+          }}>
+            <div style={{ fontSize: "14px", fontWeight: "900", color: "#f59e0b", marginBottom: "4px" }}>
+              BITÁCORA HISTÓRICA DE ENTRADAS Y SALIDAS (GUARDADO AUTOMÁTICO)
+            </div>
+            <div style={{ fontSize: "12px", color: "#94a3b8", marginBottom: "14px" }}>
+              Aquí puedes verificar todas las señales de Compra, Venta, Break-Even y Take Profit que el motor disparó durante las estructuras previas aunque no estuvieras mirando la pantalla.
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+              {signalHistory.length === 0 ? (
+                <div style={{ fontSize: "12px", color: "#64748b", textAlign: "center", padding: "20px" }}>
+                  No hay eventos registrados todavía en esta sesión.
+                </div>
+              ) : (
+                signalHistory.map((h, i) => {
+                  const isEnter = h.event_type === "ENTER";
+                  const isTp = h.event_type === "TAKE_PROFIT";
+                  const isBe = h.event_type === "BREAK_EVEN";
+                  const badgeColor = isTp
+                    ? "#eab308"
+                    : isBe
+                    ? "#38bdf8"
+                    : h.direction === "COMPRA"
+                    ? "#22c55e"
+                    : "#ef4444";
+
+                  return (
+                    <div
+                      key={h.id || i}
+                      style={{
+                        background: "#131824",
+                        border: "1px solid #1e293b",
+                        borderLeft: `4px solid ${badgeColor}`,
+                        borderRadius: "8px",
+                        padding: "10px 12px",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        flexWrap: "wrap",
+                        gap: "8px"
+                      }}
+                    >
+                      <div>
+                        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                          <span style={{
+                            fontSize: "10px",
+                            fontWeight: "900",
+                            padding: "2px 7px",
+                            borderRadius: "4px",
+                            background: `${badgeColor}22`,
+                            color: badgeColor
+                          }}>
+                            {h.event_type} • {h.direction}
+                          </span>
+                          <span style={{ fontSize: "12px", fontWeight: "800", color: "#fff" }}>
+                            Precio: ${h.price?.toFixed(2)}
+                          </span>
+                          {isEnter && (
+                            <span style={{ fontSize: "11px", color: "#94a3b8" }}>
+                              (SL: ${h.sl?.toFixed(2)} | TP1: ${h.tp1?.toFixed(2)})
+                            </span>
+                          )}
+                        </div>
+                        <div style={{ fontSize: "11px", color: "#cbd5e1", marginTop: "4px" }}>
+                          {h.reason}
+                        </div>
+                      </div>
+                      <div style={{ fontSize: "11px", fontFamily: "monospace", color: "#94a3b8", fontWeight: "700" }}>
+                        🕒 {h.time_ec} EC
+                      </div>
+                    </div>
+                  );
+                })
+              )}
             </div>
           </section>
         )}
 
         {/* ============================================================== */}
-        {/* CONTENIDO 2: AI STRATEGY LAB DASHBOARD */}
+        {/* CONTENIDO 3: AI STRATEGY LAB DASHBOARD */}
         {/* ============================================================== */}
         {activeTab === "strategy_lab" && (
           <section style={{
@@ -561,20 +766,14 @@ export default function TrendSpiderPage() {
             <div style={{ fontSize: "14px", fontWeight: "900", color: "#f59e0b", marginBottom: "6px" }}>
               AI STRATEGY LAB (CLASIFICADORES ESTADÍSTICOS & MACHINE LEARNING)
             </div>
-            <div style={{ fontSize: "12px", color: "#94a3b8", marginBottom: "16px" }}>
-              Entrena modelos supervisados sobre series temporales con etiquetado Take Profit (%) y Stop Loss (%),
-              combinando vectores mediante Cruce Genético (Crossbreeding) para predecir operaciones ganadoras con alta precisión.
-            </div>
-
-            {/* Controles de Target Labeling */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "14px", marginBottom: "16px" }}>
+            <div style={{ display: " grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "14px", marginBottom: "16px" }}>
               <div style={{ background: "#131824", padding: "12px", borderRadius: "8px", border: "1px solid #1e293b" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", fontWeight: "700", marginBottom: "6px" }}>
                   <span style={{ color: "#94a3b8" }}>TAKE PROFIT OBJETIVO:</span>
-                  <span style={{ color: "#34d399" }}>{tpPct}% (~${(tpPct * (s.live_price || 4000) / 100).toFixed(2)})</span>
+                  <span style={{ color: "#34d399" }}>{tpPct}% (~${(tpPct * (s.live_price || 4120) / 100).toFixed(2)})</span>
                 </div>
                 <input
-                  type="range" min="0.06" max="0.30" step="0.01" value={tpPct}
+                  type="range" min="0.06" max="0.25" step="0.01" value={tpPct}
                   onChange={(e) => setTpPct(parseFloat(e.target.value))}
                   style={{ width: "100%", accentColor: "#10b981" }}
                 />
@@ -583,93 +782,20 @@ export default function TrendSpiderPage() {
               <div style={{ background: "#131824", padding: "12px", borderRadius: "8px", border: "1px solid #1e293b" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", fontWeight: "700", marginBottom: "6px" }}>
                   <span style={{ color: "#94a3b8" }}>STOP LOSS MÁXIMO:</span>
-                  <span style={{ color: "#f87171" }}>{slPct}% (~${(slPct * (s.live_price || 4000) / 100).toFixed(2)})</span>
+                  <span style={{ color: "#f87171" }}>{slPct}% (~${(slPct * (s.live_price || 4120) / 100).toFixed(2)})</span>
                 </div>
                 <input
-                  type="range" min="0.04" max="0.20" step="0.01" value={slPct}
+                  type="range" min="0.04" max="0.18" step="0.01" value={slPct}
                   onChange={(e) => setSlPct(parseFloat(e.target.value))}
                   style={{ width: "100%", accentColor: "#ef4444" }}
                 />
-              </div>
-
-              <div style={{ background: "#131824", padding: "12px", borderRadius: "8px", border: "1px solid #1e293b" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", fontWeight: "700", marginBottom: "6px" }}>
-                  <span style={{ color: "#94a3b8" }}>HORIZONTE TEMPORAL:</span>
-                  <span style={{ color: "#38bdf8" }}>{horizon} Velas</span>
-                </div>
-                <input
-                  type="range" min="15" max="60" step="5" value={horizon}
-                  onChange={(e) => setHorizon(parseInt(e.target.value))}
-                  style={{ width: "100%", accentColor: "#38bdf8" }}
-                />
-              </div>
-            </div>
-
-            {/* Modelos Estadísticos Soportados */}
-            <div style={{ marginBottom: "16px" }}>
-              <div style={{ fontSize: "11px", fontWeight: "800", color: "#94a3b8", marginBottom: "8px" }}>
-                MODELO ESTADÍSTICO ACTIVO:
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "8px" }}>
-                {[
-                  { id: "Ensemble", name: "🧬 Crossbreeding Ensemble", desc: "Cruce genético ponderado de todos los modelos" },
-                  { id: "RandomForest", name: "🌲 Random Forest", desc: "Ensemble no lineal multi-timeframe" },
-                  { id: "Logistic", name: "📈 Logistic Regression", desc: "Regresión sigmoidal de probabilidad binaria" },
-                  { id: "KNN", name: "🎯 K-Nearest Neighbors", desc: "Proximidad geométrica de estados de mercado" },
-                  { id: "NaiveBayes", name: "🎲 Naive Bayes", desc: "Clasificador gaussiano probabilístico" }
-                ].map((mod) => (
-                  <div
-                    key={mod.id}
-                    onClick={() => setAiModel(mod.id)}
-                    style={{
-                      background: aiModel === mod.id ? "rgba(245, 158, 11, 0.15)" : "#131824",
-                      border: `1px solid ${aiModel === mod.id ? "#f59e0b" : "#1e293b"}`,
-                      borderRadius: "8px",
-                      padding: "10px",
-                      cursor: "pointer",
-                      transition: "all 0.2s"
-                    }}
-                  >
-                    <div style={{ fontSize: "12px", fontWeight: "800", color: aiModel === mod.id ? "#facc15" : "#fff" }}>
-                      {mod.name}
-                    </div>
-                    <div style={{ fontSize: "10px", color: "#94a3b8", marginTop: "3px" }}>
-                      {mod.desc}
-                    </div>
-                    <div style={{ fontSize: "10px", color: "#38bdf8", marginTop: "6px", fontWeight: "700" }}>
-                      Precisión: {ai.accuracies?.[mod.id] || 88}%
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Medidor de Probabilidad de la Vela Actual */}
-            <div style={{ background: "#131824", padding: "14px", borderRadius: "10px", border: "1px solid #1e293b" }}>
-              <div style={{ fontSize: "11px", fontWeight: "800", color: "#94a3b8", marginBottom: "10px" }}>
-                DISTRIBUCIÓN DE PROBABILIDAD PREDICHA PARA LA VELA EN VIVO
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                <span style={{ fontSize: "11px", fontWeight: "800", color: "#4ade80", width: "80px" }}>
-                  COMPRA {((ai.buy_prob || 0.5) * 100).toFixed(1)}%
-                </span>
-                <div style={{ flex: 1, height: "14px", background: "#1e293b", borderRadius: "7px", overflow: "hidden", display: "flex" }}>
-                  <div style={{ width: `${(ai.buy_prob || 0.5) * 100}%`, background: "linear-gradient(90deg, #10b981, #22c55e)" }} />
-                  <div style={{ width: `${(ai.sell_prob || 0.5) * 100}%`, background: "linear-gradient(90deg, #ef4444, #dc2626)" }} />
-                </div>
-                <span style={{ fontSize: "11px", fontWeight: "800", color: "#f87171", width: "80px", textAlign: "right" }}>
-                  VENTA {((ai.sell_prob || 0.5) * 100).toFixed(1)}%
-                </span>
-              </div>
-              <div style={{ fontSize: "10px", color: "#64748b", marginTop: "8px", textAlign: "center" }}>
-                * El filtro anti-ruido exige ≥ 65% de probabilidad estadística y confluencia estructural antes de emitir una orden.
               </div>
             </div>
           </section>
         )}
 
         {/* ============================================================== */}
-        {/* CONTENIDO 3: AUDITORÍA DE CONFLUENCIAS Y FILTROS */}
+        {/* CONTENIDO 4: AUDITORÍA DE CONFLUENCIAS */}
         {/* ============================================================== */}
         {activeTab === "audit" && (
           <section style={{
@@ -680,38 +806,33 @@ export default function TrendSpiderPage() {
             marginBottom: "14px"
           }}>
             <div style={{ fontSize: "13px", fontWeight: "900", color: "#f8fafc", marginBottom: "8px", textTransform: "uppercase" }}>
-              Auditoría Matemática de Confluencias (TrendSpider Scoring Engine)
+              Auditoría Matemática de Confluencias
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
               {pointsDetail.length === 0 ? (
                 <div style={{ fontSize: "12px", color: "#64748b", textAlign: "center", padding: "16px" }}>
-                  Sin gatillos de alta probabilidad en este segundo. Filtro de protección capital activo.
+                  Monitoreando el mercado en busca del siguiente cierre de confirmación en zona Fibonacci.
                 </div>
               ) : (
                 pointsDetail.map((item, idx) => (
                   <div
                     key={idx}
                     style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "flex-start",
-                      background: item.side === "COMPRA" ? "rgba(34,197,94,0.08)" : item.side === "VENTA" ? "rgba(239,68,68,0.08)" : "rgba(234,179,8,0.08)",
-                      border: `1px solid ${item.side === "COMPRA" ? "rgba(34,197,94,0.3)" : item.side === "VENTA" ? "rgba(239,68,68,0.3)" : "rgba(234,179,8,0.3)"}`,
+                      background: item.side === "COMPRA" ? "rgba(34,197,94,0.08)" : "rgba(239,68,68,0.08)",
+                      border: `1px solid ${item.side === "COMPRA" ? "rgba(34,197,94,0.3)" : "rgba(239,68,68,0.3)"}`,
                       borderRadius: "8px",
                       padding: "10px 12px"
                     }}
                   >
-                    <div>
-                      <div style={{
-                        fontSize: "12px",
-                        fontWeight: "800",
-                        color: item.side === "COMPRA" ? "#4ade80" : item.side === "VENTA" ? "#f87171" : "#facc15"
-                      }}>
-                        [{item.module}] {item.title} (+{item.weight} pts)
-                      </div>
-                      <div style={{ fontSize: "11px", color: "#94a3b8", marginTop: "3px" }}>
-                        {item.desc}
-                      </div>
+                    <div style={{
+                      fontSize: "12px",
+                      fontWeight: "800",
+                      color: item.side === "COMPRA" ? "#4ade80" : "#f87171"
+                    }}>
+                      [{item.module}] {item.title} (+{item.weight} pts)
+                    </div>
+                    <div style={{ fontSize: "11px", color: "#94a3b8", marginTop: "3px" }}>
+                      {item.desc}
                     </div>
                   </div>
                 ))
@@ -750,7 +871,6 @@ function TrendSpiderChartCanvas({ candles, trendlines, fib, heatmap, livePrice, 
 
   const candleWidth = (width - paddingRight) / Math.max(candles.length, 1);
 
-  // Posición del lock de Truth in Analysis
   let lockX = null;
   if (truthLocked && lockTimestamp) {
     const lockTsNum = parseInt(lockTimestamp);
@@ -760,12 +880,9 @@ function TrendSpiderChartCanvas({ candles, trendlines, fib, heatmap, livePrice, 
     }
   }
 
-  // Zona dorada Fibonacci (0.382 a 0.618)
   const fibLevels = fib.levels || {};
   const fib382 = fibLevels["0.382"];
   const fib618 = fibLevels["0.618"];
-  const fib000 = fibLevels["0.0"];
-  const fib100 = fibLevels["1.0"];
 
   const gzTopY = fib382 && fib618 ? Math.min(priceToY(fib382), priceToY(fib618)) : null;
   const gzBottomY = fib382 && fib618 ? Math.max(priceToY(fib382), priceToY(fib618)) : null;
@@ -774,10 +891,8 @@ function TrendSpiderChartCanvas({ candles, trendlines, fib, heatmap, livePrice, 
   return (
     <div style={{ position: "relative", width: "100%", overflowX: "auto" }}>
       <svg viewBox={`0 0 ${width} ${height}`} style={{ width: "100%", height: "auto", display: "block" }}>
-        {/* Fondo del gráfico */}
         <rect width={width} height={height} fill="#0b0e14" />
 
-        {/* Líneas horizontales de cuadrícula */}
         {[0, 0.25, 0.5, 0.75, 1].map((pct, i) => {
           const y = paddingY + pct * (height - paddingY * 2);
           const p = maxP - pct * priceSpan;
@@ -791,7 +906,6 @@ function TrendSpiderChartCanvas({ candles, trendlines, fib, heatmap, livePrice, 
           );
         })}
 
-        {/* Sombreado de la ZONA DORADA FIBONACCI (0.382 - 0.618 OTE) */}
         {gzTopY !== null && (
           <g>
             <rect
@@ -809,7 +923,6 @@ function TrendSpiderChartCanvas({ candles, trendlines, fib, heatmap, livePrice, 
           </g>
         )}
 
-        {/* Niveles clave de Fibonacci */}
         {["0.0", "0.5", "1.0"].map((lvl) => {
           if (!fibLevels[lvl]) return null;
           const y = priceToY(fibLevels[lvl]);
@@ -823,7 +936,6 @@ function TrendSpiderChartCanvas({ candles, trendlines, fib, heatmap, livePrice, 
           );
         })}
 
-        {/* Perfil del Mapa de Calor Horizontal (Order Blocks en la matriz 40x60) */}
         {heatmap.mode === "Horizontal" && heatmap.horizontal_profile?.map((hp, i) => {
           if (hp.score < 25) return null;
           const y = priceToY(hp.price);
@@ -841,7 +953,6 @@ function TrendSpiderChartCanvas({ candles, trendlines, fib, heatmap, livePrice, 
           );
         })}
 
-        {/* Velas Japonesas (M1) */}
         {candles.map((c, i) => {
           const x = i * candleWidth + candleWidth / 2;
           const openY = priceToY(c.open);
@@ -855,9 +966,7 @@ function TrendSpiderChartCanvas({ candles, trendlines, fib, heatmap, livePrice, 
 
           return (
             <g key={c.ts || i}>
-              {/* Mecha */}
               <line x1={x} y1={highY} x2={x} y2={lowY} stroke={color} strokeWidth="1.2" opacity="0.8" />
-              {/* Cuerpo */}
               <rect
                 x={x - candleWidth * 0.35}
                 y={bodyY}
@@ -870,12 +979,10 @@ function TrendSpiderChartCanvas({ candles, trendlines, fib, heatmap, livePrice, 
           );
         })}
 
-        {/* VECTORES DE AUTO-TRENDLINES (TOP 1% SCORING DE TRENDSPIDER) */}
         {trendlines.map((line, idx) => {
           const isRes = line.kind === "RESISTANCE";
           const lineColor = isRes ? "#38bdf8" : "#4ade80";
 
-          // Proyectar desde vela de origen hasta el extremo derecho del gráfico
           const startCandleIdx = candles.findIndex((c) => c.ts === line.origin_ts);
           const x1 = (startCandleIdx !== -1 ? startCandleIdx : 0) * candleWidth + candleWidth / 2;
           const y1 = priceToY(line.y1);
@@ -887,7 +994,6 @@ function TrendSpiderChartCanvas({ candles, trendlines, fib, heatmap, livePrice, 
 
           return (
             <g key={idx}>
-              {/* Línea de tendencia */}
               <line
                 x1={x1}
                 y1={y1}
@@ -898,12 +1004,10 @@ function TrendSpiderChartCanvas({ candles, trendlines, fib, heatmap, livePrice, 
                 strokeLinecap="round"
                 opacity="0.9"
               />
-              {/* Etiqueta de Scoring */}
               <rect x={x2 - 50} y={y2 - 16} width="46" height="13" fill="#000" rx="3" stroke={lineColor} strokeWidth="1" />
               <text x={x2 - 27} y={y2 - 6} fill={lineColor} fontSize="9" fontWeight="900" textAnchor="middle">
                 ★ {line.score?.toFixed(0)}
               </text>
-              {/* Círculo indicador de Breakout al cierre */}
               {hasBreakout && (
                 <circle
                   cx={x2}
@@ -918,7 +1022,6 @@ function TrendSpiderChartCanvas({ candles, trendlines, fib, heatmap, livePrice, 
           );
         })}
 
-        {/* Línea de Precio Actual Spot */}
         {livePrice && (
           <g>
             <line
@@ -952,7 +1055,6 @@ function TrendSpiderChartCanvas({ candles, trendlines, fib, heatmap, livePrice, 
           </g>
         )}
 
-        {/* LÍNEA DE CONTROL TEMPORAL: TRUTH IN ANALYSIS (ANTI-REPINTADO) */}
         {lockX !== null ? (
           <g>
             <line x1={lockX} y1={0} x2={lockX} y2={height} stroke="#eab308" strokeWidth="2" strokeDasharray="5 3" />

@@ -37,7 +37,7 @@ def init_db():
         volume REAL DEFAULT 0,
         source TEXT DEFAULT 'FEED'
     )""")
-    # Tabla de estado de la última señal y gestión de trade
+    # Tabla de estado de la última señal y gestión de trade (con control de tiempo y enfriamiento)
     c.execute("""CREATE TABLE IF NOT EXISTS last_signal (
         symbol TEXT PRIMARY KEY,
         direction TEXT,
@@ -47,8 +47,18 @@ def init_db():
         sl_price REAL DEFAULT 0,
         tp_price REAL DEFAULT 0,
         tp2_price REAL DEFAULT 0,
-        max_favorable_price REAL DEFAULT 0
+        max_favorable_price REAL DEFAULT 0,
+        entry_ts INTEGER DEFAULT 0,
+        cooldown_until INTEGER DEFAULT 0
     )""")
+    try:
+        c.execute("ALTER TABLE last_signal ADD COLUMN entry_ts INTEGER DEFAULT 0")
+    except:
+        pass
+    try:
+        c.execute("ALTER TABLE last_signal ADD COLUMN cooldown_until INTEGER DEFAULT 0")
+    except:
+        pass
     # Tabla de Historial / Bitácora de Alertas (para auditar 8am - 11am y todo el día)
     c.execute("""CREATE TABLE IF NOT EXISTS signal_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,9 +91,9 @@ DEFAULT_SETTINGS = {
     "heatmap_mode": "Horizontal",      # "Horizontal", "Depth", "Trends", "Off"
     "truth_lock_ts": "",               # Timestamp congelado o vacío
     "ai_model": "Ensemble",            # "Ensemble", "RandomForest", "Logistic", "KNN", "NaiveBayes"
-    "tp_pct": "0.10",                  # ~0.10% TP (~$4.10 en Oro)
-    "sl_pct": "0.06",                  # ~0.06% SL (~$2.50 en Oro)
-    "horizon": "30"                    # 30 velas de horizonte
+    "tp_pct": "0.15",                  # ~0.15% TP (~$6.20 en Oro para horizonte 20 min)
+    "sl_pct": "0.10",                  # ~0.10% SL (~$4.10 en Oro estructural)
+    "horizon": "20"                    # Pronóstico y horizonte de ganancia a 20 minutos
 }
 
 def get_setting(key: str) -> str:
@@ -548,7 +558,7 @@ def get_last_signal() -> Dict[str, Any]:
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        c.execute("SELECT direction, confirmed_at, phase, entry_price, sl_price, tp_price, tp2_price, max_favorable_price FROM last_signal WHERE symbol='XAUUSD'")
+        c.execute("SELECT direction, confirmed_at, phase, entry_price, sl_price, tp_price, tp2_price, max_favorable_price, entry_ts, cooldown_until FROM last_signal WHERE symbol='XAUUSD'")
         row = c.fetchone()
         conn.close()
         if row:
@@ -560,7 +570,9 @@ def get_last_signal() -> Dict[str, Any]:
                 "sl_price": float(row[4] or 0),
                 "tp_price": float(row[5] or 0),
                 "tp2_price": float(row[6] or 0),
-                "max_favorable_price": float(row[7] or row[3] or 0)
+                "max_favorable_price": float(row[7] or row[3] or 0),
+                "entry_ts": int(row[8] or 0),
+                "cooldown_until": int(row[9] or 0)
             }
     except Exception as e:
         print(f"get_last_signal error: {e}")
@@ -572,7 +584,9 @@ def get_last_signal() -> Dict[str, Any]:
         "sl_price": 0.0,
         "tp_price": 0.0,
         "tp2_price": 0.0,
-        "max_favorable_price": 0.0
+        "max_favorable_price": 0.0,
+        "entry_ts": 0,
+        "cooldown_until": 0
     }
 
 def update_last_signal(
@@ -582,15 +596,17 @@ def update_last_signal(
     sl_price: float = 0.0,
     tp_price: float = 0.0,
     tp2_price: float = 0.0,
-    max_favorable_price: float = 0.0
+    max_favorable_price: float = 0.0,
+    entry_ts: int = 0,
+    cooldown_until: int = 0
 ):
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("""INSERT OR REPLACE INTO last_signal
-                     (symbol, direction, confirmed_at, phase, entry_price, sl_price, tp_price, tp2_price, max_favorable_price)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                  ("XAUUSD", direction, datetime.now(EC_TZ).isoformat(), phase, entry_price, sl_price, tp_price, tp2_price, max_favorable_price))
+                     (symbol, direction, confirmed_at, phase, entry_price, sl_price, tp_price, tp2_price, max_favorable_price, entry_ts, cooldown_until)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                  ("XAUUSD", direction, datetime.now(EC_TZ).isoformat(), phase, entry_price, sl_price, tp_price, tp2_price, max_favorable_price, entry_ts, cooldown_until))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -624,9 +640,9 @@ def analyze_market_trendspider(
     quality_filter = str(_clean(quality_filter, "quality_filter", "Most Relevant"))
     heatmap_mode = str(_clean(heatmap_mode, "heatmap_mode", "Horizontal"))
     ai_model = str(_clean(ai_model, "ai_model", "Ensemble"))
-    tp_pct = float(_clean(tp_pct, "tp_pct", 0.10))
-    sl_pct = float(_clean(sl_pct, "sl_pct", 0.06))
-    horizon = int(_clean(horizon, "horizon", 30))
+    tp_pct = float(_clean(tp_pct, "tp_pct", 0.15))
+    sl_pct = float(_clean(sl_pct, "sl_pct", 0.10))
+    horizon = int(_clean(horizon, "horizon", 20))
     truth_lock_ts = _clean(truth_lock_ts, "truth_lock_ts", "")
     if hasattr(truth_lock_ts, "default"):
         truth_lock_ts = ""
@@ -828,24 +844,28 @@ def analyze_market_trendspider(
             "desc": "Alta densidad de órdenes pasivas frenando la subida."
         })
 
-    # Pilar E: AI Strategy Lab Probability Filter
-    ai_buy_prob = ai_strategy_data.get("buy_prob", 0.50)
-    ai_sell_prob = ai_strategy_data.get("sell_prob", 0.50)
-    ai_confidence = ai_strategy_data.get("ensemble_confidence", 50)
+    # Pilar E: AI Strategy Lab Probability Filter (Análisis Numérico Cuantitativo a 20 min)
+    ai_buy_prob = float(ai_strategy_data.get("buy_prob", 0.50))
+    ai_sell_prob = float(ai_strategy_data.get("sell_prob", 0.50))
+    tot_p = ai_buy_prob + ai_sell_prob + 1e-6
+    norm_ai_buy = ai_buy_prob / tot_p
+    norm_ai_sell = ai_sell_prob / tot_p
+    ai_win_rate = float(ai_strategy_data.get("metrics", {}).get("win_rate", 70.0))
+    ai_confidence = int(round(max(norm_ai_buy, norm_ai_sell) * 100))
 
-    if ai_buy_prob >= 0.58:
+    if norm_ai_buy >= 0.56:
         buy_points += 3
         confluences_audit.append({
             "module": "AI_STRATEGY_LAB", "side": "COMPRA", "weight": 3,
-            "title": f"MODELO IA ({ai_model}): PROBABILIDAD {ai_buy_prob*100:.0f}%",
-            "desc": "Clasificador estadístico confirma ventaja matemática compradora."
+            "title": f"MODELO IA ({ai_model}): VENTAJA MATEMÁTICA {norm_ai_buy*100:.0f}%",
+            "desc": f"Análisis numérico confirma ventaja compradora a 20 min (Acierto histórico: {ai_win_rate:.0f}%)."
         })
-    elif ai_sell_prob >= 0.58:
+    elif norm_ai_sell >= 0.56:
         sell_points += 3
         confluences_audit.append({
             "module": "AI_STRATEGY_LAB", "side": "VENTA", "weight": 3,
-            "title": f"MODELO IA ({ai_model}): PROBABILIDAD {ai_sell_prob*100:.0f}%",
-            "desc": "Clasificador estadístico confirma ventaja matemática vendedora."
+            "title": f"MODELO IA ({ai_model}): VENTAJA MATEMÁTICA {norm_ai_sell*100:.0f}%",
+            "desc": f"Análisis numérico confirma ventaja vendedora a 20 min (Acierto histórico: {ai_win_rate:.0f}%)."
         })
 
     # S/R y Espacio Libre
@@ -855,7 +875,8 @@ def analyze_market_trendspider(
     room_down = max(0.0, round(live_price - support_val, 2))
 
     # ==========================================================================
-    # GESTIÓN DEL CICLO DE VIDA DE LA OPERACIÓN Y DISPARO SONORO
+    # ==========================================================================
+    # GESTIÓN DEL CICLO DE VIDA DE LA OPERACIÓN Y DISPARO SONORO (PRONÓSTICO 20 MIN)
     # ==========================================================================
     last_sig = get_last_signal()
     active_dir = last_sig["direction"]
@@ -864,172 +885,356 @@ def analyze_market_trendspider(
     current_tp1 = last_sig["tp_price"]
     current_tp2 = last_sig["tp2_price"]
     max_fav = last_sig["max_favorable_price"] if last_sig["max_favorable_price"] > 1000 else entry_p
+    entry_ts = int(last_sig.get("entry_ts", 0) or 0)
+    cooldown_until = int(last_sig.get("cooldown_until", 0) or 0)
 
-    # Dimensionamiento dinámico de Stop Loss (~$2.80) y Take Profit (~$4.20 a $5.50) para M5
-    sl_distance = round(max(2.4, min(atr * 1.4, 4.0)), 2)
-    tp1_distance = round(max(3.6, min(atr * 2.2, 6.5)), 2)
-    tp2_distance = round(max(6.0, min(atr * 3.5, 11.0)), 2)
+    # Dimensionamiento estructural para Pronóstico a 20 Minutos (~4 velas M5 en Oro):
+    # SL amplio basado en pivotes y ATR (~$4.50 a $6.50) para ser inmune al ruido de 1 sola vela.
+    # TP proyectado para swing de ganancia a 20 min (~$5.50 a $8.50).
+    sl_distance = round(max(4.50, min(atr * 2.2, 6.50)), 2)
+    tp1_distance = round(max(5.50, min(atr * 2.8, 8.50)), 2)
+    tp2_distance = round(max(9.00, min(atr * 4.2, 14.00)), 2)
+
+    # Control de tiempo transcurrido (Minuto X de 20)
+    elapsed_min = 0
+    remaining_min = 20
+    if active_dir in ["COMPRA", "VENTA"]:
+        if entry_ts <= 0:
+            entry_ts = now_ts
+        elapsed_seconds = max(0, now_ts - entry_ts)
+        elapsed_min = int(elapsed_seconds // 60)
+        remaining_min = max(0, 20 - elapsed_min)
+
+    is_in_cooldown = (now_ts < cooldown_until)
+    cooldown_rem_sec = max(0, cooldown_until - now_ts)
 
     final_dir = "ESPERA"
-    alert_text = "⏸ ESPERANDO FIN DE RETROCESO O RUPTURA M5"
+    alert_text = "⏸ PRONÓSTICO 20 MIN: ANALIZANDO ESTRUCTURAS PREVIAS"
     alert_type = "WAIT"
     alert_desc = f"Estructura M5: {m5_swing['structure']}. {m5_swing['reason']}"
-    flip_reason = "Monitoreando estructura Impulso/Retroceso"
+    flip_reason = "Monitoreando patrones numéricos y fractales"
     confidence_score = max(ai_confidence, 55)
 
-    # 1. Monitoreo de Operación COMPRA ya abierta
+    # 1. Monitoreo de Operación COMPRA ya abierta (Inmune a fluctuaciones de una sola vela)
     if active_dir == "COMPRA":
         pnl = round(live_price - entry_p, 2)
         if live_price > max_fav:
             max_fav = live_price
-            update_last_signal("COMPRA", "HOLD_COMPRA", entry_p, current_sl, current_tp1, current_tp2, max_fav)
+            update_last_signal("COMPRA", "HOLD_COMPRA", entry_p, current_sl, current_tp1, current_tp2, max_fav, entry_ts, 0)
 
-        # Regla 1: Proteger en Break-Even cuando avance >= +$2.00 USD
-        if (max_fav - entry_p) >= 2.00 and current_sl < entry_p:
-            current_sl = round(entry_p + 0.30, 2)
-            update_last_signal("COMPRA", "BREAK_EVEN_LOCKED", entry_p, current_sl, current_tp1, current_tp2, max_fav)
-            log_signal_event("BREAK_EVEN", "COMPRA", live_price, current_sl, current_tp1, pnl, "Stop Loss movido a Break-Even (+0.30 USD asegurados)")
+        # Regla 1: Proteger en Break-Even cuando avance >= +$3.80 USD (asegura +1.00 USD ganancia)
+        if (max_fav - entry_p) >= 3.80 and current_sl < entry_p:
+            current_sl = round(entry_p + 1.00, 2)
+            update_last_signal("COMPRA", "BREAK_EVEN_LOCKED", entry_p, current_sl, current_tp1, current_tp2, max_fav, entry_ts, 0)
+            log_signal_event("BREAK_EVEN", "COMPRA", live_price, current_sl, current_tp1, pnl, "Stop Loss protegido en Break-Even (+1.00 USD asegurado)")
 
-        # Regla 2: Salida por Take Profit o por Giro Bajista M5 en Ganancia
-        if (live_price >= current_tp1 and current_tp1 > 1000) or (pnl >= 2.20 and m5_sig in ["SELL_CHOCH", "SELL_PULLBACK"]):
-            update_last_signal("ESPERA", "TP_COMPRA_EXECUTED", 0, 0, 0, 0, 0)
-            log_signal_event("TAKE_PROFIT", "COMPRA", live_price, current_sl, current_tp1, pnl, f"Salida en ganancia COMPRA (+${pnl:.2f} USD)")
+        # Regla 2: Salida por Take Profit objetivo (+5.20 USD o TP1 alcanzado)
+        if (live_price >= current_tp1 and current_tp1 > 1000) or pnl >= 5.20:
+            update_last_signal("ESPERA", "TP_COMPRA_EXECUTED", 0, 0, 0, 0, 0, 0, now_ts + 180)
+            log_signal_event("TAKE_PROFIT", "COMPRA", live_price, current_sl, current_tp1, pnl, f"Objetivo 20 min alcanzado COMPRA (+${pnl:.2f} USD)")
+            forecast_20m_data = {
+                "direction": "COMPRA", "horizon_minutes": 20, "elapsed_minutes": elapsed_min,
+                "remaining_minutes": 0, "expected_gain_usd": tp1_distance, "target_price": current_tp1,
+                "structural_sl": current_sl, "ai_probability": int(round(norm_ai_buy * 100)), "in_cooldown": True,
+                "cooldown_remaining_sec": 180, "m5_structure": m5_swing.get("structure", ""), "m5_reason": m5_swing.get("reason", "")
+            }
             return build_response(
-                direction="ESPERA", confidence=95,
+                direction="ESPERA", confidence=96,
                 alert=f"💰 SALIR EN GANANCIA COMPRA (+${pnl:.2f} USD)",
                 alert_type="TAKE_PROFIT",
-                alert_desc=f"El impulso desde {entry_p:.2f} alcanzó objetivo o detectó giro en M5 en {live_price:.2f}. Cierra y asegura tu ganancia ahora.",
+                alert_desc=f"Objetivo de la proyección a 20 minutos alcanzado en ${live_price:.2f} desde entrada en ${entry_p:.2f}. Cierra y asegura tu ganancia de +${pnl:.2f} USD.",
                 entry_p=entry_p, sl=current_sl, tp1=current_tp1, tp2=current_tp2,
                 live_price=live_price, feed_source=feed_source, atr=atr,
                 confluences=confluences_audit, trendlines_data=trendlines_data,
                 fib_data=fib_data, heatmap_data=heatmap_data, ai_data=ai_strategy_data,
                 candles=candles_1m, is_locked=is_locked, lock_ts=truth_lock_ts,
                 support=support_val, resistance=resistance_val, room_up=room_up, room_down=room_down,
-                buy_score=buy_points, sell_score=sell_points, flip_reason="TP / Ganancia asegurada",
-                m5_swing=m5_swing
+                buy_score=buy_points, sell_score=sell_points, flip_reason="TP / Meta alcanzada",
+                m5_swing=m5_swing, forecast_20m=forecast_20m_data
             )
 
-        # Regla 3: Salida por Invalidación Estructural (CHoCH Bajista o SL tocado)
-        if (live_price <= current_sl and current_sl > 1000) or m5_sig == "SELL_CHOCH" or sell_points >= buy_points + 5:
-            update_last_signal("ESPERA", "SL_COMPRA_EXECUTED", 0, 0, 0, 0, 0)
-            log_signal_event("EXIT", "COMPRA", live_price, current_sl, current_tp1, pnl, f"Salida de protección COMPRA ({pnl:+.2f} USD)")
+        # Regla 3: Salida por Maduración de Pronóstico de 20 Minutos con Ganancia
+        if elapsed_min >= 18 and pnl >= 2.00:
+            update_last_signal("ESPERA", "HORIZON_20M_PROFIT", 0, 0, 0, 0, 0, 0, now_ts + 180)
+            log_signal_event("TAKE_PROFIT", "COMPRA", live_price, current_sl, current_tp1, pnl, f"Maduración de 20 min cumplida con ganancia COMPRA (+${pnl:.2f} USD)")
+            forecast_20m_data = {
+                "direction": "COMPRA", "horizon_minutes": 20, "elapsed_minutes": elapsed_min,
+                "remaining_minutes": 0, "expected_gain_usd": tp1_distance, "target_price": current_tp1,
+                "structural_sl": current_sl, "ai_probability": int(round(norm_ai_buy * 100)), "in_cooldown": True,
+                "cooldown_remaining_sec": 180, "m5_structure": m5_swing.get("structure", ""), "m5_reason": m5_swing.get("reason", "")
+            }
+            return build_response(
+                direction="ESPERA", confidence=95,
+                alert=f"💰 SALIDA POR MADURACIÓN DE 20 MIN (+${pnl:.2f} USD)",
+                alert_type="TAKE_PROFIT",
+                alert_desc=f"Se completó el horizonte de 20 minutos con ganancia acumulada de +${pnl:.2f} USD (${entry_p:.2f} → ${live_price:.2f}). Cierra la posición para asegurar beneficios.",
+                entry_p=entry_p, sl=current_sl, tp1=current_tp1, tp2=current_tp2,
+                live_price=live_price, feed_source=feed_source, atr=atr,
+                confluences=confluences_audit, trendlines_data=trendlines_data,
+                fib_data=fib_data, heatmap_data=heatmap_data, ai_data=ai_strategy_data,
+                candles=candles_1m, is_locked=is_locked, lock_ts=truth_lock_ts,
+                support=support_val, resistance=resistance_val, room_up=room_up, room_down=room_down,
+                buy_score=buy_points, sell_score=sell_points, flip_reason="Horizonte 20m cumplido",
+                m5_swing=m5_swing, forecast_20m=forecast_20m_data
+            )
+
+        # Regla 4: Salida por Stop Loss Estructural Real (NO por mechas ni puntos aislados)
+        if (live_price <= current_sl and current_sl > 1000):
+            update_last_signal("ESPERA", "SL_COMPRA_EXECUTED", 0, 0, 0, 0, 0, 0, now_ts + 180)
+            log_signal_event("EXIT", "COMPRA", live_price, current_sl, current_tp1, pnl, f"Stop Loss estructural alcanzado COMPRA ({pnl:+.2f} USD)")
+            forecast_20m_data = {
+                "direction": "COMPRA", "horizon_minutes": 20, "elapsed_minutes": elapsed_min,
+                "remaining_minutes": 0, "expected_gain_usd": tp1_distance, "target_price": current_tp1,
+                "structural_sl": current_sl, "ai_probability": int(round(norm_ai_buy * 100)), "in_cooldown": True,
+                "cooldown_remaining_sec": 180, "m5_structure": m5_swing.get("structure", ""), "m5_reason": m5_swing.get("reason", "")
+            }
             return build_response(
                 direction="ESPERA", confidence=90,
                 alert=f"🛑 SALIR DE COMPRA AHORA ({pnl:+.2f} USD)",
                 alert_type="EXIT",
-                alert_desc=f"La estructura alcista se invalidó en {live_price:.2f}. Cierra la compra de inmediato.",
+                alert_desc=f"El precio perforó el soporte estructural fijado en ${current_sl:.2f}. Cierra la compra para proteger tu capital.",
                 entry_p=entry_p, sl=current_sl, tp1=current_tp1, tp2=current_tp2,
                 live_price=live_price, feed_source=feed_source, atr=atr,
                 confluences=confluences_audit, trendlines_data=trendlines_data,
                 fib_data=fib_data, heatmap_data=heatmap_data, ai_data=ai_strategy_data,
                 candles=candles_1m, is_locked=is_locked, lock_ts=truth_lock_ts,
                 support=support_val, resistance=resistance_val, room_up=room_up, room_down=room_down,
-                buy_score=buy_points, sell_score=sell_points, flip_reason="Estructura invalidada",
-                m5_swing=m5_swing
+                buy_score=buy_points, sell_score=sell_points, flip_reason="Soporte estructural roto",
+                m5_swing=m5_swing, forecast_20m=forecast_20m_data
             )
 
-        final_dir = "COMPRA"
-        alert_text = f"🛡️ MANTENER COMPRA ({pnl:+.2f} USD)"
-        alert_type = "ENTER"
-        alert_desc = f"Entrada: ${entry_p:.2f} • SL: ${current_sl:.2f} • Meta TP1: ${current_tp1:.2f}. Estructura M5 alcista intacta."
-        flip_reason = f"En COMPRA ({pnl:+.2f} USD)"
-        confidence_score = 86
+        # Regla 5: Invalidación Macro por Estructura Mayor (Solo tras al menos 6 min y ruptura bajista mayor)
+        if elapsed_min >= 6 and m5_sig == "SELL_CHOCH" and pnl <= -3.00:
+            update_last_signal("ESPERA", "CHOUCH_INVALIDATION_COMPRA", 0, 0, 0, 0, 0, 0, now_ts + 180)
+            log_signal_event("EXIT", "COMPRA", live_price, current_sl, current_tp1, pnl, f"Invalidación estructural macro COMPRA ({pnl:+.2f} USD)")
+            forecast_20m_data = {
+                "direction": "COMPRA", "horizon_minutes": 20, "elapsed_minutes": elapsed_min,
+                "remaining_minutes": 0, "expected_gain_usd": tp1_distance, "target_price": current_tp1,
+                "structural_sl": current_sl, "ai_probability": int(round(norm_ai_buy * 100)), "in_cooldown": True,
+                "cooldown_remaining_sec": 180, "m5_structure": m5_swing.get("structure", ""), "m5_reason": m5_swing.get("reason", "")
+            }
+            return build_response(
+                direction="ESPERA", confidence=90,
+                alert=f"🛑 SALIR DE COMPRA AHORA ({pnl:+.2f} USD)",
+                alert_type="EXIT",
+                alert_desc=f"Estructura macro rota al cierre en ${live_price:.2f}. Cierra la compra de inmediato.",
+                entry_p=entry_p, sl=current_sl, tp1=current_tp1, tp2=current_tp2,
+                live_price=live_price, feed_source=feed_source, atr=atr,
+                confluences=confluences_audit, trendlines_data=trendlines_data,
+                fib_data=fib_data, heatmap_data=heatmap_data, ai_data=ai_strategy_data,
+                candles=candles_1m, is_locked=is_locked, lock_ts=truth_lock_ts,
+                support=support_val, resistance=resistance_val, room_up=room_up, room_down=room_down,
+                buy_score=buy_points, sell_score=sell_points, flip_reason="CHoCH Macro confirmado",
+                m5_swing=m5_swing, forecast_20m=forecast_20m_data
+            )
 
-    # 2. Monitoreo de Operación VENTA ya abierta
+        # Permanecer FIRMES durante el desarrollo del pronóstico (Fluctuaciones normales)
+        final_dir = "COMPRA"
+        alert_text = f"🛡️ MANTENER COMPRA • PRONÓSTICO 20 MIN ({pnl:+.2f} USD • Min {elapsed_min}/20)"
+        alert_type = "ENTER"
+        alert_desc = f"Progreso: {elapsed_min} de 20 min (~{remaining_min} min restantes). Entrada: ${entry_p:.2f} • SL Estructural: ${current_sl:.2f} • Meta 20m: ${current_tp1:.2f}. Fluctuación normal dentro de la estructura."
+        flip_reason = f"Pronóstico 20 min activo ({pnl:+.2f} USD)"
+        confidence_score = 88
+
+    # 2. Monitoreo de Operación VENTA ya abierta (Inmune a fluctuaciones de una sola vela)
     elif active_dir == "VENTA":
         pnl = round(entry_p - live_price, 2)
         if live_price < max_fav:
             max_fav = live_price
-            update_last_signal("VENTA", "HOLD_VENTA", entry_p, current_sl, current_tp1, current_tp2, max_fav)
+            update_last_signal("VENTA", "HOLD_VENTA", entry_p, current_sl, current_tp1, current_tp2, max_fav, entry_ts, 0)
 
-        if (entry_p - max_fav) >= 2.00 and current_sl > entry_p:
-            current_sl = round(entry_p - 0.30, 2)
-            update_last_signal("VENTA", "BREAK_EVEN_LOCKED", entry_p, current_sl, current_tp1, current_tp2, max_fav)
-            log_signal_event("BREAK_EVEN", "VENTA", live_price, current_sl, current_tp1, pnl, "Stop Loss movido a Break-Even (+0.30 USD asegurados)")
+        # Regla 1: Proteger en Break-Even cuando avance >= +$3.80 USD
+        if (entry_p - max_fav) >= 3.80 and current_sl > entry_p:
+            current_sl = round(entry_p - 1.00, 2)
+            update_last_signal("VENTA", "BREAK_EVEN_LOCKED", entry_p, current_sl, current_tp1, current_tp2, max_fav, entry_ts, 0)
+            log_signal_event("BREAK_EVEN", "VENTA", live_price, current_sl, current_tp1, pnl, "Stop Loss protegido en Break-Even (+1.00 USD asegurado)")
 
-        if (live_price <= current_tp1 and current_tp1 > 1000) or (pnl >= 2.20 and m5_sig in ["BUY_REVERSAL", "BUY_PULLBACK"]):
-            update_last_signal("ESPERA", "TP_VENTA_EXECUTED", 0, 0, 0, 0, 0)
-            log_signal_event("TAKE_PROFIT", "VENTA", live_price, current_sl, current_tp1, pnl, f"Salida en ganancia VENTA (+${pnl:.2f} USD)")
+        # Regla 2: Salida por Take Profit objetivo (+5.20 USD o TP1 alcanzado)
+        if (live_price <= current_tp1 and current_tp1 > 1000) or pnl >= 5.20:
+            update_last_signal("ESPERA", "TP_VENTA_EXECUTED", 0, 0, 0, 0, 0, 0, now_ts + 180)
+            log_signal_event("TAKE_PROFIT", "VENTA", live_price, current_sl, current_tp1, pnl, f"Objetivo 20 min alcanzado VENTA (+${pnl:.2f} USD)")
+            forecast_20m_data = {
+                "direction": "VENTA", "horizon_minutes": 20, "elapsed_minutes": elapsed_min,
+                "remaining_minutes": 0, "expected_gain_usd": tp1_distance, "target_price": current_tp1,
+                "structural_sl": current_sl, "ai_probability": int(round(norm_ai_sell * 100)), "in_cooldown": True,
+                "cooldown_remaining_sec": 180, "m5_structure": m5_swing.get("structure", ""), "m5_reason": m5_swing.get("reason", "")
+            }
             return build_response(
-                direction="ESPERA", confidence=95,
+                direction="ESPERA", confidence=96,
                 alert=f"💰 SALIR EN GANANCIA VENTA (+${pnl:.2f} USD)",
                 alert_type="TAKE_PROFIT",
-                alert_desc=f"La caída desde {entry_p:.2f} alcanzó objetivo o detectó soporte fuerte M5 en {live_price:.2f}. Cierra y asegura tu ganancia.",
+                alert_desc=f"Objetivo de la proyección a 20 minutos alcanzado en ${live_price:.2f} desde entrada en ${entry_p:.2f}. Cierra y asegura tu ganancia de +${pnl:.2f} USD.",
                 entry_p=entry_p, sl=current_sl, tp1=current_tp1, tp2=current_tp2,
                 live_price=live_price, feed_source=feed_source, atr=atr,
                 confluences=confluences_audit, trendlines_data=trendlines_data,
                 fib_data=fib_data, heatmap_data=heatmap_data, ai_data=ai_strategy_data,
                 candles=candles_1m, is_locked=is_locked, lock_ts=truth_lock_ts,
                 support=support_val, resistance=resistance_val, room_up=room_up, room_down=room_down,
-                buy_score=buy_points, sell_score=sell_points, flip_reason="TP / Ganancia asegurada",
-                m5_swing=m5_swing
+                buy_score=buy_points, sell_score=sell_points, flip_reason="TP / Meta alcanzada",
+                m5_swing=m5_swing, forecast_20m=forecast_20m_data
             )
 
-        if (live_price >= current_sl and current_sl > 1000) or m5_sig == "BUY_REVERSAL" or buy_points >= sell_points + 5:
-            update_last_signal("ESPERA", "SL_VENTA_EXECUTED", 0, 0, 0, 0, 0)
-            log_signal_event("EXIT", "VENTA", live_price, current_sl, current_tp1, pnl, f"Salida de protección VENTA ({pnl:+.2f} USD)")
+        # Regla 3: Salida por Maduración de Pronóstico de 20 Minutos con Ganancia
+        if elapsed_min >= 18 and pnl >= 2.00:
+            update_last_signal("ESPERA", "HORIZON_20M_PROFIT", 0, 0, 0, 0, 0, 0, now_ts + 180)
+            log_signal_event("TAKE_PROFIT", "VENTA", live_price, current_sl, current_tp1, pnl, f"Maduración de 20 min cumplida con ganancia VENTA (+${pnl:.2f} USD)")
+            forecast_20m_data = {
+                "direction": "VENTA", "horizon_minutes": 20, "elapsed_minutes": elapsed_min,
+                "remaining_minutes": 0, "expected_gain_usd": tp1_distance, "target_price": current_tp1,
+                "structural_sl": current_sl, "ai_probability": int(round(norm_ai_sell * 100)), "in_cooldown": True,
+                "cooldown_remaining_sec": 180, "m5_structure": m5_swing.get("structure", ""), "m5_reason": m5_swing.get("reason", "")
+            }
+            return build_response(
+                direction="ESPERA", confidence=95,
+                alert=f"💰 SALIDA POR MADURACIÓN DE 20 MIN (+${pnl:.2f} USD)",
+                alert_type="TAKE_PROFIT",
+                alert_desc=f"Se completó el horizonte de 20 minutos con ganancia acumulada de +${pnl:.2f} USD (${entry_p:.2f} → ${live_price:.2f}). Cierra la posición para asegurar beneficios.",
+                entry_p=entry_p, sl=current_sl, tp1=current_tp1, tp2=current_tp2,
+                live_price=live_price, feed_source=feed_source, atr=atr,
+                confluences=confluences_audit, trendlines_data=trendlines_data,
+                fib_data=fib_data, heatmap_data=heatmap_data, ai_data=ai_strategy_data,
+                candles=candles_1m, is_locked=is_locked, lock_ts=truth_lock_ts,
+                support=support_val, resistance=resistance_val, room_up=room_up, room_down=room_down,
+                buy_score=buy_points, sell_score=sell_points, flip_reason="Horizonte 20m cumplido",
+                m5_swing=m5_swing, forecast_20m=forecast_20m_data
+            )
+
+        # Regla 4: Salida por Stop Loss Estructural Real
+        if (live_price >= current_sl and current_sl > 1000):
+            update_last_signal("ESPERA", "SL_VENTA_EXECUTED", 0, 0, 0, 0, 0, 0, now_ts + 180)
+            log_signal_event("EXIT", "VENTA", live_price, current_sl, current_tp1, pnl, f"Stop Loss estructural alcanzado VENTA ({pnl:+.2f} USD)")
+            forecast_20m_data = {
+                "direction": "VENTA", "horizon_minutes": 20, "elapsed_minutes": elapsed_min,
+                "remaining_minutes": 0, "expected_gain_usd": tp1_distance, "target_price": current_tp1,
+                "structural_sl": current_sl, "ai_probability": int(round(norm_ai_sell * 100)), "in_cooldown": True,
+                "cooldown_remaining_sec": 180, "m5_structure": m5_swing.get("structure", ""), "m5_reason": m5_swing.get("reason", "")
+            }
             return build_response(
                 direction="ESPERA", confidence=90,
                 alert=f"🛑 SALIR DE VENTA AHORA ({pnl:+.2f} USD)",
                 alert_type="EXIT",
-                alert_desc=f"La estructura bajista fue rota al alza en {live_price:.2f}. Cierra la venta de inmediato.",
+                alert_desc=f"El precio superó la resistencia estructural fijada en ${current_sl:.2f}. Cierra la venta para proteger tu capital.",
                 entry_p=entry_p, sl=current_sl, tp1=current_tp1, tp2=current_tp2,
                 live_price=live_price, feed_source=feed_source, atr=atr,
                 confluences=confluences_audit, trendlines_data=trendlines_data,
                 fib_data=fib_data, heatmap_data=heatmap_data, ai_data=ai_strategy_data,
                 candles=candles_1m, is_locked=is_locked, lock_ts=truth_lock_ts,
                 support=support_val, resistance=resistance_val, room_up=room_up, room_down=room_down,
-                buy_score=buy_points, sell_score=sell_points, flip_reason="Estructura invalidada",
-                m5_swing=m5_swing
+                buy_score=buy_points, sell_score=sell_points, flip_reason="Resistencia estructural rota",
+                m5_swing=m5_swing, forecast_20m=forecast_20m_data
             )
 
+        # Regla 5: Invalidación Macro por Estructura Mayor
+        if elapsed_min >= 6 and m5_sig == "BUY_REVERSAL" and pnl <= -3.00:
+            update_last_signal("ESPERA", "CHOUCH_INVALIDATION_VENTA", 0, 0, 0, 0, 0, 0, now_ts + 180)
+            log_signal_event("EXIT", "VENTA", live_price, current_sl, current_tp1, pnl, f"Invalidación estructural macro VENTA ({pnl:+.2f} USD)")
+            forecast_20m_data = {
+                "direction": "VENTA", "horizon_minutes": 20, "elapsed_minutes": elapsed_min,
+                "remaining_minutes": 0, "expected_gain_usd": tp1_distance, "target_price": current_tp1,
+                "structural_sl": current_sl, "ai_probability": int(round(norm_ai_sell * 100)), "in_cooldown": True,
+                "cooldown_remaining_sec": 180, "m5_structure": m5_swing.get("structure", ""), "m5_reason": m5_swing.get("reason", "")
+            }
+            return build_response(
+                direction="ESPERA", confidence=90,
+                alert=f"🛑 SALIR DE VENTA AHORA ({pnl:+.2f} USD)",
+                alert_type="EXIT",
+                alert_desc=f"Estructura macro rota al cierre en ${live_price:.2f}. Cierra la venta de inmediato.",
+                entry_p=entry_p, sl=current_sl, tp1=current_tp1, tp2=current_tp2,
+                live_price=live_price, feed_source=feed_source, atr=atr,
+                confluences=confluences_audit, trendlines_data=trendlines_data,
+                fib_data=fib_data, heatmap_data=heatmap_data, ai_data=ai_strategy_data,
+                candles=candles_1m, is_locked=is_locked, lock_ts=truth_lock_ts,
+                support=support_val, resistance=resistance_val, room_up=room_up, room_down=room_down,
+                buy_score=buy_points, sell_score=sell_points, flip_reason="CHoCH Macro confirmado",
+                m5_swing=m5_swing, forecast_20m=forecast_20m_data
+            )
+
+        # Permanecer FIRMES durante el desarrollo del pronóstico
         final_dir = "VENTA"
-        alert_text = f"🛡️ MANTENER VENTA ({pnl:+.2f} USD)"
+        alert_text = f"🛡️ MANTENER VENTA • PRONÓSTICO 20 MIN ({pnl:+.2f} USD • Min {elapsed_min}/20)"
         alert_type = "ENTER"
-        alert_desc = f"Entrada: ${entry_p:.2f} • SL: ${current_sl:.2f} • Meta TP1: ${current_tp1:.2f}. Estructura M5 bajista intacta."
-        flip_reason = f"En VENTA ({pnl:+.2f} USD)"
-        confidence_score = 86
+        alert_desc = f"Progreso: {elapsed_min} de 20 min (~{remaining_min} min restantes). Entrada: ${entry_p:.2f} • SL Estructural: ${current_sl:.2f} • Meta 20m: ${current_tp1:.2f}. Fluctuación normal dentro de la estructura."
+        flip_reason = f"Pronóstico 20 min activo ({pnl:+.2f} USD)"
+        confidence_score = 88
 
-    # 3. Disparo de NUEVA Entrada (Aprovecha Impulso+Retroceso M5 con Filtro Anti-Trampas)
+    # 3. Disparo de NUEVO Pronóstico a 20 Minutos (Análisis de Estructuras Anteriores + Modelos Numéricos)
     else:
-        bull_trap_blocked = bool(m5_swing.get("bull_trap_block", False))
-        bear_trap_blocked = bool(m5_swing.get("bear_trap_block", False))
-
-        if buy_points >= 5 and buy_points >= sell_points + 3 and not bull_trap_blocked:
-            final_dir = "COMPRA"
-            entry_p = live_price
-            current_sl = round(live_price - sl_distance, 2)
-            current_tp1 = round(live_price + tp1_distance, 2)
-            current_tp2 = round(live_price + tp2_distance, 2)
-            confidence_score = min(96, int(74 + (buy_points * 2.2)))
-            alert_text = f"🚀 ENTRADA COMPRA CONFIRMADA ({m5_swing['structure']})"
-            alert_type = "ENTER"
-            alert_desc = f"{m5_swing['reason']} • Confluencia: {buy_points} pts a favor."
-            flip_reason = f"Nueva COMPRA en ${live_price:.2f}"
-            update_last_signal("COMPRA", "NEW_ENTRY", entry_p, current_sl, current_tp1, current_tp2, entry_p)
-            log_signal_event("ENTER", "COMPRA", entry_p, current_sl, current_tp1, 0.0, m5_swing["structure"] + ": " + m5_swing["reason"])
-
-        elif sell_points >= 5 and sell_points >= buy_points + 3 and not bear_trap_blocked:
-            final_dir = "VENTA"
-            entry_p = live_price
-            current_sl = round(live_price + sl_distance, 2)
-            current_tp1 = round(live_price - tp1_distance, 2)
-            current_tp2 = round(live_price - tp2_distance, 2)
-            confidence_score = min(96, int(74 + (sell_points * 2.2)))
-            alert_text = f"📉 ENTRADA VENTA CONFIRMADA ({m5_swing['structure']})"
-            alert_type = "ENTER"
-            alert_desc = f"{m5_swing['reason']} • Confluencia: {sell_points} pts a favor."
-            flip_reason = f"Nueva VENTA en ${live_price:.2f}"
-            update_last_signal("VENTA", "NEW_ENTRY", entry_p, current_sl, current_tp1, current_tp2, entry_p)
-            log_signal_event("ENTER", "VENTA", entry_p, current_sl, current_tp1, 0.0, m5_swing["structure"] + ": " + m5_swing["reason"])
-
-        else:
+        if is_in_cooldown:
             final_dir = "ESPERA"
-            confidence_score = 55
-            alert_text = f"⏸ ESPERA • {m5_swing['structure']}"
+            alert_text = f"⏳ ENFRIAMIENTO POST-OPERACIÓN ({cooldown_rem_sec}s)"
             alert_type = "WAIT"
-            alert_desc = f"{m5_swing['reason']} (Puntos: Compra {buy_points} / Venta {sell_points}). Esperando vela de giro en Fibonacci o ruptura."
-            flip_reason = "Esperando fin de retroceso"
+            alert_desc = "Filtro anti-ruido activo: evaluando consolidación de estructura previa para evitar entradas apresuradas."
+            flip_reason = f"Enfriamiento ({cooldown_rem_sec}s)"
+            confidence_score = 60
+        else:
+            bull_trap_blocked = bool(m5_swing.get("bull_trap_block", False))
+            bear_trap_blocked = bool(m5_swing.get("bear_trap_block", False))
+
+            if buy_points >= 6 and buy_points >= sell_points + 3 and not bull_trap_blocked:
+                final_dir = "COMPRA"
+                entry_p = live_price
+
+                # Anclar SL debajo del suelo de estructuras anteriores si está en rango seguro
+                last_sl = float(m5_swing.get("last_sl") or (live_price - sl_distance))
+                if (live_price - 6.50) <= last_sl <= (live_price - 3.50):
+                    current_sl = round(last_sl - 0.40, 2)
+                else:
+                    current_sl = round(live_price - sl_distance, 2)
+
+                current_tp1 = round(live_price + tp1_distance, 2)
+                current_tp2 = round(live_price + tp2_distance, 2)
+                confidence_score = min(96, int(75 + (buy_points * 2.2)))
+                alert_text = f"🚀 PRONÓSTICO 20 MIN: COMPRA CONFIRMADA (+${tp1_distance:.2f} USD)"
+                alert_type = "ENTER"
+                alert_desc = f"Estructura previa consolidada ({m5_swing['structure']}). Meta proyectada a 20 min: ${current_tp1:.2f} • SL Estructural: ${current_sl:.2f}. Mantén la posición ante fluctuaciones menores."
+                flip_reason = f"Nueva COMPRA en ${live_price:.2f}"
+                update_last_signal("COMPRA", "NEW_ENTRY", entry_p, current_sl, current_tp1, current_tp2, entry_p, now_ts, 0)
+                log_signal_event("ENTER", "COMPRA", entry_p, current_sl, current_tp1, 0.0, f"Pronóstico 20 min: {m5_swing['structure']}")
+
+            elif sell_points >= 6 and sell_points >= buy_points + 3 and not bear_trap_blocked:
+                final_dir = "VENTA"
+                entry_p = live_price
+
+                # Anclar SL encima del techo de estructuras anteriores si está en rango seguro
+                last_sh = float(m5_swing.get("last_sh") or (live_price + sl_distance))
+                if (live_price + 3.50) <= last_sh <= (live_price + 6.50):
+                    current_sl = round(last_sh + 0.40, 2)
+                else:
+                    current_sl = round(live_price + sl_distance, 2)
+
+                current_tp1 = round(live_price - tp1_distance, 2)
+                current_tp2 = round(live_price - tp2_distance, 2)
+                confidence_score = min(96, int(75 + (sell_points * 2.2)))
+                alert_text = f"📉 PRONÓSTICO 20 MIN: VENTA CONFIRMADA (+${tp1_distance:.2f} USD)"
+                alert_type = "ENTER"
+                alert_desc = f"Estructura previa consolidada ({m5_swing['structure']}). Meta proyectada a 20 min: ${current_tp1:.2f} • SL Estructural: ${current_sl:.2f}. Mantén la posición ante fluctuaciones menores."
+                flip_reason = f"Nueva VENTA en ${live_price:.2f}"
+                update_last_signal("VENTA", "NEW_ENTRY", entry_p, current_sl, current_tp1, current_tp2, entry_p, now_ts, 0)
+                log_signal_event("ENTER", "VENTA", entry_p, current_sl, current_tp1, 0.0, f"Pronóstico 20 min: {m5_swing['structure']}")
+
+            else:
+                final_dir = "ESPERA"
+                confidence_score = 55
+                alert_text = f"⏸ PRONÓSTICO 20 MIN: ANALIZANDO ESTRUCTURAS PREVIAS"
+                alert_type = "WAIT"
+                alert_desc = f"{m5_swing['structure']}: {m5_swing['reason']} (Confluencia: Compra {buy_points} / Venta {sell_points}). Esperando consolidación de patrón o ruptura confirmada."
+                flip_reason = "Analizando estructuras previas"
+
+    forecast_dir_eval = active_dir if active_dir in ["COMPRA", "VENTA"] else ("COMPRA" if buy_points >= sell_points + 2 else "VENTA" if sell_points >= buy_points + 2 else "ESPERA")
+    forecast_20m_data = {
+        "direction": forecast_dir_eval,
+        "horizon_minutes": 20,
+        "elapsed_minutes": elapsed_min,
+        "remaining_minutes": remaining_min,
+        "expected_gain_usd": tp1_distance,
+        "target_price": round(current_tp1 if active_dir != "ESPERA" else (live_price + tp1_distance if forecast_dir_eval == "COMPRA" else live_price - tp1_distance), 2),
+        "structural_sl": round(current_sl if active_dir != "ESPERA" else (live_price - sl_distance if forecast_dir_eval == "COMPRA" else live_price + sl_distance), 2),
+        "ai_probability": int(round(norm_ai_buy * 100)) if forecast_dir_eval == "COMPRA" else int(round(norm_ai_sell * 100)) if forecast_dir_eval == "VENTA" else int(round(max(norm_ai_buy, norm_ai_sell) * 100)),
+        "in_cooldown": is_in_cooldown,
+        "cooldown_remaining_sec": cooldown_rem_sec,
+        "m5_structure": m5_swing.get("structure", ""),
+        "m5_reason": m5_swing.get("reason", "")
+    }
 
     return build_response(
         direction=final_dir, confidence=confidence_score,
@@ -1044,7 +1249,7 @@ def analyze_market_trendspider(
         candles=candles_1m, is_locked=is_locked, lock_ts=truth_lock_ts,
         support=support_val, resistance=resistance_val, room_up=room_up, room_down=room_down,
         buy_score=buy_points, sell_score=sell_points, flip_reason=flip_reason,
-        m5_swing=m5_swing
+        m5_swing=m5_swing, forecast_20m=forecast_20m_data
     )
 
 def build_response(
@@ -1056,7 +1261,8 @@ def build_response(
     candles: List[Dict[str, Any]], is_locked: bool, lock_ts: Optional[str],
     support: float, resistance: float, room_up: float, room_down: float,
     buy_score: int, sell_score: int, flip_reason: str,
-    m5_swing: Optional[Dict[str, Any]] = None
+    m5_swing: Optional[Dict[str, Any]] = None,
+    forecast_20m: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     return {
         "symbol": "XAUUSD",
@@ -1065,8 +1271,8 @@ def build_response(
         "sl": round(sl, 2),
         "tp1": round(tp1, 2),
         "tp2": round(tp2, 2),
-        "dist": round(abs(entry_p - sl), 2) if sl > 0 else round(atr * 1.4, 2),
-        "tp_dist": round(abs(tp1 - entry_p), 2) if tp1 > 0 else round(atr * 2.2, 2),
+        "dist": round(abs(entry_p - sl), 2) if sl > 0 else round(atr * 2.2, 2),
+        "tp_dist": round(abs(tp1 - entry_p), 2) if tp1 > 0 else round(atr * 2.8, 2),
         "live_price": round(live_price, 2),
         "feed_source": feed_source,
         "confidence": confidence,
@@ -1083,6 +1289,7 @@ def build_response(
         "sell_score": sell_score,
         "points_detail": confluences,
         "m5_structure": m5_swing or {},
+        "forecast_20m": forecast_20m or {},
         "signal_history": get_signal_history(20),
         "trendlines": trendlines_data.get("active_lines", []),
         "top_trendline_score": trendlines_data.get("top_score", 0.0),

@@ -198,11 +198,11 @@ export default function TrendSpiderPage() {
   const [truthLocked, setTruthLocked] = useState(false);
   const [lockTimestamp, setLockTimestamp] = useState("");
 
-  // AI Strategy Lab
+  // AI Strategy Lab (Pronóstico 20 min)
   const [aiModel, setAiModel] = useState("Ensemble");
-  const [tpPct, setTpPct] = useState(0.10);
-  const [slPct, setSlPct] = useState(0.06);
-  const [horizon, setHorizon] = useState(30);
+  const [tpPct, setTpPct] = useState(0.15);
+  const [slPct, setSlPct] = useState(0.10);
+  const [horizon, setHorizon] = useState(20);
 
   // Pestaña visual activa
   const [activeTab, setActiveTab] = useState("chart");
@@ -348,26 +348,26 @@ export default function TrendSpiderPage() {
           if (currType === "EXIT" && prev.alertType !== "EXIT") {
             playAlertSound(
               "EXIT",
-              `¡Atención! Salir de la operación ahora mismo a ${sig.live_price?.toFixed(0)} dólares. ${sig.alert_desc || "Cierra la operación inmediatamente."}`,
+              `¡Atención! Salir de la operación ahora a ${sig.live_price?.toFixed(0)} dólares para proteger capital. Cierra la posición de inmediato.`,
               `🛑 SALIR AHORA ($${sig.live_price?.toFixed(2)})`
             );
           } else if (currType === "TAKE_PROFIT" && prev.alertType !== "TAKE_PROFIT") {
             playAlertSound(
               "TAKE_PROFIT",
-              `¡Objetivo alcanzado! Salir en ganancia ahora mismo a ${sig.live_price?.toFixed(0)} dólares.`,
+              `¡Objetivo del pronóstico de 20 minutos alcanzado! Salir en ganancia ahora a ${sig.live_price?.toFixed(0)} dólares. Cierra y asegura tu ganancia.`,
               `💰 SALIR EN GANANCIA ($${sig.live_price?.toFixed(2)})`
             );
           } else if (currDir === "COMPRA" && prev.direction !== "COMPRA") {
             playAlertSound(
               "BUY",
-              `Atención. Entrada de compra confirmada en oro a ${sig.live_price?.toFixed(0)} dólares. Stop loss en ${sig.sl?.toFixed(0)} y Take Profit en ${sig.tp1?.toFixed(0)}.`,
-              `🚀 COMPRA CONFIRMADA XAU/USD ($${sig.live_price?.toFixed(2)})`
+              `Atención. Pronóstico de compra a 20 minutos confirmado en oro a ${sig.live_price?.toFixed(0)} dólares. Objetivo en ${sig.tp1?.toFixed(0)} y stop loss estructural en ${sig.sl?.toFixed(0)}. Mantén la posición ante fluctuaciones menores.`,
+              `🚀 COMPRA 20 MIN XAU/USD ($${sig.live_price?.toFixed(2)})`
             );
           } else if (currDir === "VENTA" && prev.direction !== "VENTA") {
             playAlertSound(
               "SELL",
-              `Atención. Entrada de venta confirmada en oro a ${sig.live_price?.toFixed(0)} dólares. Stop loss en ${sig.sl?.toFixed(0)} y Take Profit en ${sig.tp1?.toFixed(0)}.`,
-              `📉 VENTA CONFIRMADA XAU/USD ($${sig.live_price?.toFixed(2)})`
+              `Atención. Pronóstico de venta a 20 minutos confirmado en oro a ${sig.live_price?.toFixed(0)} dólares. Objetivo en ${sig.tp1?.toFixed(0)} y stop loss estructural en ${sig.sl?.toFixed(0)}. Mantén la posición ante fluctuaciones menores.`,
+              `📉 VENTA 20 MIN XAU/USD ($${sig.live_price?.toFixed(2)})`
             );
           }
         }
@@ -465,6 +465,7 @@ export default function TrendSpiderPage() {
   const pointsDetail = s.points_detail || [];
   const signalHistory = s.signal_history || [];
   const m5Struct = s.m5_structure || {};
+  const forecast = s.forecast_20m || {};
 
   return (
     <div style={{
@@ -859,6 +860,140 @@ export default function TrendSpiderPage() {
               <div style={{ fontSize: "10px", color: "#94a3b8", fontWeight: "700" }}>ALERTAS HOY</div>
               <div style={{ fontSize: "16px", fontWeight: "900", marginTop: "2px", color: "#38bdf8" }}>
                 {signalHistory.length} registradas
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* ============================================================== */}
+        {/* PRONÓSTICO DE MERCADO ~20 MINUTOS (ESTRUCTURAL + NUMÉRICO IA) */}
+        {/* ============================================================== */}
+        <section style={{
+          background: "linear-gradient(135deg, #0b1120 0%, #111827 100%)",
+          border: `2px solid ${isBuy ? "#059669" : isSell ? "#dc2626" : "#2563eb"}`,
+          borderRadius: "14px",
+          padding: "16px",
+          marginBottom: "14px",
+          boxShadow: `0 8px 24px rgba(0,0,0,0.5)`
+        }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "10px", marginBottom: "12px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+              <div style={{
+                background: isBuy ? "#10b981" : isSell ? "#ef4444" : "#3b82f6",
+                color: "#fff",
+                width: "36px",
+                height: "36px",
+                borderRadius: "10px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: "18px",
+                fontWeight: "900",
+                boxShadow: `0 0 12px ${isBuy ? "#10b98188" : isSell ? "#ef444488" : "#3b82f688"}`
+              }}>
+                {isBuy ? "▲" : isSell ? "▼" : "⏳"}
+              </div>
+              <div>
+                <div style={{ fontSize: "14px", fontWeight: "900", color: "#f8fafc", letterSpacing: "-0.2px" }}>
+                  PRONÓSTICO DE DIRECCIÓN ~20 MINUTOS
+                </div>
+                <div style={{ fontSize: "11px", color: "#94a3b8" }}>
+                  Estructuras previas + Modelos Numéricos (Protegido contra fluctuaciones de 1 vela)
+                </div>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <div style={{
+                background: isBuy ? "rgba(34, 197, 94, 0.16)" : isSell ? "rgba(239, 68, 68, 0.16)" : "rgba(59, 130, 246, 0.16)",
+                border: `1px solid ${isBuy ? "#22c55e" : isSell ? "#ef4444" : "#3b82f6"}`,
+                color: isBuy ? "#4ade80" : isSell ? "#f87171" : "#60a5fa",
+                padding: "6px 12px",
+                borderRadius: "20px",
+                fontSize: "12px",
+                fontWeight: "900",
+                letterSpacing: "0.5px"
+              }}>
+                {forecast.direction || s.direction} • {forecast.ai_probability || s.confidence || 75}% IA
+              </div>
+            </div>
+          </div>
+
+          {/* Barra de progreso de tiempo de maduración 20 Minutos */}
+          {!isWait && (
+            <div style={{
+              background: "rgba(0,0,0,0.5)",
+              border: "1px solid #1e293b",
+              borderRadius: "10px",
+              padding: "10px 14px",
+              marginBottom: "12px"
+            }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "11px", marginBottom: "6px" }}>
+                <span style={{ color: "#e2e8f0" }}>
+                  ⏱️ <strong>Maduración del Pronóstico:</strong> Minuto <b style={{ color: "#facc15", fontSize: "13px" }}>{forecast.elapsed_minutes || 0}</b> de 20 min
+                </span>
+                <span style={{ color: "#38bdf8", fontWeight: "800" }}>
+                  ~{forecast.remaining_minutes !== undefined ? forecast.remaining_minutes : 20} min restantes
+                </span>
+              </div>
+              <div style={{ width: "100%", height: "9px", background: "#1e293b", borderRadius: "5px", overflow: "hidden" }}>
+                <div style={{
+                  width: `${Math.min(100, Math.max(5, ((forecast.elapsed_minutes || 0) / 20) * 100))}%`,
+                  height: "100%",
+                  background: isBuy ? "linear-gradient(90deg, #10b981, #34d399)" : "linear-gradient(90deg, #ef4444, #f87171)",
+                  borderRadius: "5px",
+                  transition: "width 0.4s ease"
+                }} />
+              </div>
+              <div style={{ fontSize: "10px", color: "#94a3b8", marginTop: "6px" }}>
+                🛡️ Si el precio retrocede dentro del canal, mantén la posición. El sistema no saldrá por mechas aisladas.
+              </div>
+            </div>
+          )}
+
+          {/* Grid de 4 Pilares del Pronóstico Cuantitativo */}
+          <div style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))",
+            gap: "8px"
+          }}>
+            <div style={{ background: "rgba(0,0,0,0.4)", borderRadius: "8px", padding: "10px", border: "1px solid #1e293b" }}>
+              <div style={{ fontSize: "10px", color: "#94a3b8", fontWeight: "700" }}>GANANCIA A 20 MIN</div>
+              <div style={{ fontSize: "16px", fontWeight: "900", color: "#34d399", marginTop: "2px" }}>
+                +${(forecast.expected_gain_usd || s.tp_dist || 5.5).toFixed(2)} USD
+              </div>
+              <div style={{ fontSize: "10px", color: "#64748b", marginTop: "2px" }}>
+                Precio Meta: ${forecast.target_price?.toFixed(2) || s.tp1?.toFixed(2)}
+              </div>
+            </div>
+
+            <div style={{ background: "rgba(0,0,0,0.4)", borderRadius: "8px", padding: "10px", border: "1px solid #1e293b" }}>
+              <div style={{ fontSize: "10px", color: "#94a3b8", fontWeight: "700" }}>SL ESTRUCTURAL</div>
+              <div style={{ fontSize: "16px", fontWeight: "900", color: "#f87171", marginTop: "2px" }}>
+                ${forecast.structural_sl?.toFixed(2) || s.sl?.toFixed(2)}
+              </div>
+              <div style={{ fontSize: "10px", color: "#64748b", marginTop: "2px" }}>
+                Anclado a pivote mayor
+              </div>
+            </div>
+
+            <div style={{ background: "rgba(0,0,0,0.4)", borderRadius: "8px", padding: "10px", border: "1px solid #1e293b" }}>
+              <div style={{ fontSize: "10px", color: "#94a3b8", fontWeight: "700" }}>PROBABILIDAD IA</div>
+              <div style={{ fontSize: "16px", fontWeight: "900", color: "#38bdf8", marginTop: "2px" }}>
+                {forecast.ai_probability || s.confidence || 75}%
+              </div>
+              <div style={{ fontSize: "10px", color: "#64748b", marginTop: "2px" }}>
+                Horizonte 20 velas
+              </div>
+            </div>
+
+            <div style={{ background: "rgba(0,0,0,0.4)", borderRadius: "8px", padding: "10px", border: "1px solid #1e293b" }}>
+              <div style={{ fontSize: "10px", color: "#94a3b8", fontWeight: "700" }}>ESTADO ANTI-RUIDO</div>
+              <div style={{ fontSize: "12px", fontWeight: "800", color: "#facc15", marginTop: "4px" }}>
+                {forecast.in_cooldown ? `⏳ Enfriamiento (${forecast.cooldown_remaining_sec}s)` : "🛡️ Inmune a 1 vela"}
+              </div>
+              <div style={{ fontSize: "10px", color: "#64748b", marginTop: "2px" }}>
+                Filtro Whipsaw activo
               </div>
             </div>
           </div>

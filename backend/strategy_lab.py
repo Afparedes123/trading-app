@@ -27,9 +27,9 @@ class TrendSpiderStrategyLab:
     """
     def __init__(
         self,
-        tp_pct: float = 0.12,
-        sl_pct: float = 0.08,
-        horizon: int = 30,
+        tp_pct: float = 0.15,
+        sl_pct: float = 0.10,
+        horizon: int = 20,
         active_model: str = "Ensemble"
     ):
         self.tp_pct = tp_pct

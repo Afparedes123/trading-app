@@ -1,4 +1,4 @@
-import os, sqlite3, requests, asyncio, math, time
+import os, sqlite3, requests, asyncio, math, time, threading
 from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -1118,6 +1118,60 @@ def health():
 def signals_history_endpoint():
     return get_signal_history(30)
 
+_LATEST_ANALYSIS_LOCK = threading.Lock()
+_LATEST_ANALYSIS_SNAPSHOT = None
+_LATEST_ANALYSIS_TS = 0.0
+
+def get_or_compute_analysis(
+    analysis_type: Optional[str] = None,
+    drawing_input: Optional[str] = None,
+    island_gaps: Optional[str] = None,
+    quality_filter: Optional[str] = None,
+    heatmap_mode: Optional[str] = None,
+    ai_model: Optional[str] = None,
+    tp_pct: Optional[float] = None,
+    sl_pct: Optional[float] = None,
+    horizon: Optional[int] = None,
+    truth_lock_ts: Optional[str] = None
+) -> Dict[str, Any]:
+    global _LATEST_ANALYSIS_SNAPSHOT, _LATEST_ANALYSIS_TS
+    now = time.time()
+    if truth_lock_ts and str(truth_lock_ts).strip() != "":
+        return analyze_market_trendspider(
+            analysis_type=analysis_type,
+            drawing_input=drawing_input,
+            island_gaps=island_gaps,
+            quality_filter=quality_filter,
+            heatmap_mode=heatmap_mode,
+            ai_model=ai_model,
+            tp_pct=tp_pct,
+            sl_pct=sl_pct,
+            horizon=horizon,
+            truth_lock_ts=truth_lock_ts
+        )
+
+    if _LATEST_ANALYSIS_SNAPSHOT is not None and (now - _LATEST_ANALYSIS_TS) < 2.5:
+        return _LATEST_ANALYSIS_SNAPSHOT
+
+    with _LATEST_ANALYSIS_LOCK:
+        if _LATEST_ANALYSIS_SNAPSHOT is not None and (time.time() - _LATEST_ANALYSIS_TS) < 2.5:
+            return _LATEST_ANALYSIS_SNAPSHOT
+        res = analyze_market_trendspider(
+            analysis_type=analysis_type,
+            drawing_input=drawing_input,
+            island_gaps=island_gaps,
+            quality_filter=quality_filter,
+            heatmap_mode=heatmap_mode,
+            ai_model=ai_model,
+            tp_pct=tp_pct,
+            sl_pct=sl_pct,
+            horizon=horizon,
+            truth_lock_ts=truth_lock_ts
+        )
+        _LATEST_ANALYSIS_SNAPSHOT = res
+        _LATEST_ANALYSIS_TS = time.time()
+        return res
+
 @app.get("/signals/live")
 def signals_live(
     analysis_type: Optional[str] = Query(None),
@@ -1132,7 +1186,7 @@ def signals_live(
     truth_lock_ts: Optional[str] = Query(None)
 ):
     try:
-        result = analyze_market_trendspider(
+        result = get_or_compute_analysis(
             analysis_type=analysis_type,
             drawing_input=drawing_input,
             island_gaps=island_gaps,
@@ -1213,6 +1267,11 @@ async def tradingview_webhook(request: Request):
 @app.on_event("startup")
 async def startup_event():
     sync_historical_1m_candles()
+    try:
+        get_or_compute_analysis()
+    except Exception as e:
+        print(f"Pre-warm analysis error: {e}")
+
     async def monitor_loop():
         ticks = 0
         while True:
@@ -1223,7 +1282,9 @@ async def startup_event():
                 ticks += 1
                 if ticks % 4 == 0:
                     sync_historical_1m_candles()
+                if ticks % 2 == 0:
+                    get_or_compute_analysis()
             except Exception as e:
                 print(f"Monitor loop error: {e}")
-            await asyncio.sleep(5)
+            await asyncio.sleep(4)
     asyncio.create_task(monitor_loop())

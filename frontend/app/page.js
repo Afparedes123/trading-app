@@ -57,15 +57,35 @@ function sendAndroidSystemNotification(title, body, isUrgent = false) {
     if ("vibrate" in navigator) {
       navigator.vibrate(isUrgent ? [600, 200, 600, 200, 800] : [400, 150, 400]);
     }
-    if ("Notification" in window && Notification.permission === "granted") {
-      new Notification(title, {
-        body,
-        tag: "edgealert-xauusd",
-        renotify: true,
-        requireInteraction: isUrgent
+    const options = {
+      body,
+      icon: "/icon-192.png",
+      badge: "/icon-192.png",
+      vibrate: isUrgent ? [600, 200, 600, 200, 800] : [400, 150, 400],
+      tag: "edgealert-signal",
+      renotify: true,
+      requireInteraction: isUrgent,
+      data: { url: "/" }
+    };
+
+    if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
+      navigator.serviceWorker.controller.postMessage({
+        type: "SHOW_NOTIFICATION",
+        title,
+        options
       });
+    } else if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.ready.then((reg) => {
+        reg.showNotification(title, options);
+      }).catch(() => {});
+    } else if ("Notification" in window && Notification.permission === "granted") {
+      try {
+        new Notification(title, options);
+      } catch (e) {}
     }
-  } catch (e) {}
+  } catch (e) {
+    console.warn("Notification send warning:", e);
+  }
 }
 
 function playAlertSound(type = "BUY", voiceMessage = "", notifTitle = "") {
@@ -163,7 +183,10 @@ export default function TrendSpiderPage() {
   // Control de Alertas Sonoras y Modo Continuo Android
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [androidKeepAwake, setAndroidKeepAwake] = useState(false);
-  const [heartbeatCount, setHeartbeatCount] = useState(1);
+  const [heartbeatCount, setHeartbeatCount] = useState(0);
+  const [deferredPrompt, setDeferredPrompt] = useState(null);
+  const [isInstallable, setIsInstallable] = useState(false);
+  const isFetchingRef = useRef(false);
   const lastAlertRef = useRef({ direction: null, alertType: null, alertText: null });
 
   // Parámetros de Control TrendSpider
@@ -184,6 +207,40 @@ export default function TrendSpiderPage() {
   // Pestaña visual activa
   const [activeTab, setActiveTab] = useState("chart");
 
+  // Registro del Service Worker y captura del evento de instalación nativa WebAPK
+  useEffect(() => {
+    if (typeof window !== "undefined" && "serviceWorker" in navigator) {
+      navigator.serviceWorker.register("/sw.js").then((reg) => {
+        console.log("Service Worker EdgeAlert activo:", reg.scope);
+      }).catch((e) => {
+        console.warn("SW error:", e);
+      });
+    }
+
+    const handleBeforeInstall = (e) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+      setIsInstallable(true);
+    };
+    window.addEventListener("beforeinstallprompt", handleBeforeInstall);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", handleBeforeInstall);
+    };
+  }, []);
+
+  const installPwaApp = async () => {
+    if (deferredPrompt) {
+      deferredPrompt.prompt();
+      const { outcome } = await deferredPrompt.userChoice;
+      if (outcome === "accepted") {
+        setIsInstallable(false);
+        setDeferredPrompt(null);
+      }
+    } else {
+      alert("Para instalar en Android como App Nativa:\n1. Toca los tres puntos (⋮) en Chrome.\n2. Selecciona 'Instalar aplicación' o 'Agregar a la pantalla principal'.");
+    }
+  };
+
   const activateAndroidContinuousMode = async (speakConfirmation = false) => {
     const ctx = getAudioContext();
     if (ctx && ctx.state === "suspended") {
@@ -193,13 +250,15 @@ export default function TrendSpiderPage() {
     const locked = await requestAndroidWakeLock();
     setAndroidKeepAwake(true);
     setSoundEnabled(true);
-    if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "default") {
-      Notification.requestPermission().catch(() => {});
+    if (typeof window !== "undefined" && "Notification" in window) {
+      if (Notification.permission === "default") {
+        Notification.requestPermission().catch(() => {});
+      }
     }
     if (speakConfirmation) {
       playAlertSound(
         "BUY",
-        "Modo continuo Android activado. La pantalla y las alertas de voz permanecerán encendidas sin interrupción.",
+        "Modo continuo Android activado. La pantalla y las alertas de voz permanecerán encendidas.",
         "📱 Modo Continuo Android Activo"
       );
     }
@@ -233,6 +292,9 @@ export default function TrendSpiderPage() {
   }, []);
 
   const fetchData = async () => {
+    if (isFetchingRef.current) return;
+    isFetchingRef.current = true;
+
     try {
       const queryParams = new URLSearchParams({
         analysis_type: analysisType,
@@ -248,7 +310,7 @@ export default function TrendSpiderPage() {
       });
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 7500);
+      const timeoutId = setTimeout(() => controller.abort(), 15000);
 
       let res;
       try {
@@ -283,32 +345,25 @@ export default function TrendSpiderPage() {
 
         // Evaluar disparo de Alerta Sonora + Vibración + Notificación Android por orden estricto de prioridad
         if (prev.direction !== null && soundEnabled) {
-          // PRIORIDAD 1: SALIDA URGENTE (Stop Loss o Giro de Operación)
           if (currType === "EXIT" && prev.alertType !== "EXIT") {
             playAlertSound(
               "EXIT",
               `¡Atención! Salir de la operación ahora mismo a ${sig.live_price?.toFixed(0)} dólares. ${sig.alert_desc || "Cierra la operación inmediatamente."}`,
               `🛑 SALIR AHORA ($${sig.live_price?.toFixed(2)})`
             );
-          }
-          // PRIORIDAD 2: SALIDA EN GANANCIA (Take Profit)
-          else if (currType === "TAKE_PROFIT" && prev.alertType !== "TAKE_PROFIT") {
+          } else if (currType === "TAKE_PROFIT" && prev.alertType !== "TAKE_PROFIT") {
             playAlertSound(
               "TAKE_PROFIT",
               `¡Objetivo alcanzado! Salir en ganancia ahora mismo a ${sig.live_price?.toFixed(0)} dólares.`,
               `💰 SALIR EN GANANCIA ($${sig.live_price?.toFixed(2)})`
             );
-          }
-          // PRIORIDAD 3: NUEVA ENTRADA EN COMPRA
-          else if (currDir === "COMPRA" && prev.direction !== "COMPRA") {
+          } else if (currDir === "COMPRA" && prev.direction !== "COMPRA") {
             playAlertSound(
               "BUY",
               `Atención. Entrada de compra confirmada en oro a ${sig.live_price?.toFixed(0)} dólares. Stop loss en ${sig.sl?.toFixed(0)} y Take Profit en ${sig.tp1?.toFixed(0)}.`,
               `🚀 COMPRA CONFIRMADA XAU/USD ($${sig.live_price?.toFixed(2)})`
             );
-          }
-          // PRIORIDAD 4: NUEVA ENTRADA EN VENTA
-          else if (currDir === "VENTA" && prev.direction !== "VENTA") {
+          } else if (currDir === "VENTA" && prev.direction !== "VENTA") {
             playAlertSound(
               "SELL",
               `Atención. Entrada de venta confirmada en oro a ${sig.live_price?.toFixed(0)} dólares. Stop loss en ${sig.sl?.toFixed(0)} y Take Profit en ${sig.tp1?.toFixed(0)}.`,
@@ -325,7 +380,7 @@ export default function TrendSpiderPage() {
 
         setSignal(sig);
         setHeartbeatCount((c) => c + 1);
-        setBackendStatus(`🟢 Tiempo Real 0s Lag • ${sig.feed_source || "Spot Institucional"} • M5 Anti-Trampas`);
+        setBackendStatus(`🟢 Flujo Activo 0s Lag • ${sig.feed_source || "Spot Institucional"} • M5 Anti-Trampas`);
 
         try {
           localStorage.setItem("ts_quant_signal_cache", JSON.stringify(sig));
@@ -334,15 +389,27 @@ export default function TrendSpiderPage() {
         throw new Error("Datos incompletos");
       }
     } catch (e) {
-      setBackendStatus(`🟡 Reconectando flujo continuo en tiempo real...`);
+      const msg = e.name === "AbortError" ? "Servidor respondiendo..." : (e.message || "reconectando");
+      setBackendStatus(`🟡 ${msg}`);
     } finally {
+      isFetchingRef.current = false;
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchData();
-    const fetchInterval = setInterval(fetchData, 3500);
+    let timerId = null;
+    let isMounted = true;
+
+    const pollLoop = async () => {
+      await fetchData();
+      if (isMounted) {
+        timerId = setTimeout(pollLoop, 3000);
+      }
+    };
+
+    pollLoop();
+
     const clockInterval = setInterval(() => {
       const now = new Date().toLocaleString("es-EC", {
         timeZone: "America/Guayaquil",
@@ -357,7 +424,8 @@ export default function TrendSpiderPage() {
     }, 1000);
 
     return () => {
-      clearInterval(fetchInterval);
+      isMounted = false;
+      if (timerId) clearTimeout(timerId);
       clearInterval(clockInterval);
     };
   }, [analysisType, drawingInput, islandGaps, qualityFilter, heatmapMode, aiModel, tpPct, slPct, horizon, truthLocked, lockTimestamp]);
@@ -479,8 +547,23 @@ export default function TrendSpiderPage() {
                 EDGEALERT <span style={{ color: "#f59e0b" }}>TRENDSPIDER</span> <span style={{ fontSize: "11px", color: "#4ade80", fontWeight: "700", background: "rgba(34,197,94,0.12)", padding: "2px 7px", borderRadius: "5px", border: "1px solid rgba(34,197,94,0.3)" }}>ANDROID CONTINUO 0s LAG</span>
               </h1>
             </div>
-            <div style={{ fontSize: "11px", color: "#94a3b8", marginTop: "4px" }}>
-              {timeEc} • {backendStatus} • <span style={{ color: "#4ade80", fontWeight: "700" }}>Latido #{heartbeatCount} (3.5s)</span>
+            <div style={{ fontSize: "11px", color: "#94a3b8", marginTop: "4px", display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+              <span>{timeEc} • {backendStatus} • <strong style={{ color: "#4ade80" }}>Latido #{heartbeatCount} (3s)</strong></span>
+              <button
+                onClick={() => { isFetchingRef.current = false; fetchData(); }}
+                style={{
+                  background: "rgba(245, 158, 11, 0.2)",
+                  color: "#facc15",
+                  border: "1px solid #f59e0b",
+                  borderRadius: "4px",
+                  padding: "2px 8px",
+                  fontSize: "10px",
+                  fontWeight: "700",
+                  cursor: "pointer"
+                }}
+              >
+                🔄 Reconectar
+              </button>
             </div>
             <div style={{ fontSize: "12px", color: "#38bdf8", fontWeight: "700", marginTop: "4px" }}>
               XAU/USD SPOT: <span style={{ color: "#fff", fontSize: "15px", fontWeight: "900" }}>${s.live_price ? s.live_price.toFixed(2) : "4142.00"}</span>
@@ -491,6 +574,26 @@ export default function TrendSpiderPage() {
 
           {/* Botones de Modo Continuo Android, Audio y Estado */}
           <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+            <button
+              onClick={installPwaApp}
+              style={{
+                background: "linear-gradient(135deg, #10b981, #059669)",
+                color: "#ffffff",
+                border: "1px solid #34d399",
+                borderRadius: "8px",
+                padding: "8px 12px",
+                fontSize: "11px",
+                fontWeight: "900",
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+                boxShadow: "0 2px 8px rgba(16, 185, 129, 0.3)"
+              }}
+            >
+              📲 INSTALAR APP EN ANDROID (WebAPK)
+            </button>
+
             <button
               onClick={() => activateAndroidContinuousMode(true)}
               style={{
@@ -507,7 +610,7 @@ export default function TrendSpiderPage() {
                 gap: "6px"
               }}
             >
-              {androidKeepAwake ? "📱 ANDROID SIEMPRE ENCENDIDO (WakeLock Activo)" : "📱 ACTIVAR MODO CONTINUO ANDROID"}
+              {androidKeepAwake ? "📱 PANTALLA SIEMPRE ENCENDIDA (Activo)" : "📱 ACTIVAR MODO CONTINUO ANDROID"}
             </button>
 
             <button

@@ -187,6 +187,8 @@ export default function TrendSpiderPage() {
   const [deferredPrompt, setDeferredPrompt] = useState(null);
   const [isInstallable, setIsInstallable] = useState(false);
   const isFetchingRef = useRef(false);
+  const lastFetchStartRef = useRef(0);
+  const lastSuccessfulFetchRef = useRef(Date.now());
   const lastAlertRef = useRef({ direction: null, alertType: null, alertText: null });
 
   // Parámetros de Control TrendSpider
@@ -275,25 +277,44 @@ export default function TrendSpiderPage() {
         requestAndroidWakeLock();
         const ctx = getAudioContext();
         if (ctx && ctx.state === "suspended") ctx.resume().catch(() => {});
+        isFetchingRef.current = false;
+        lastFetchStartRef.current = 0;
         fetchData();
       }
+    };
+    const handleOnline = () => {
+      isFetchingRef.current = false;
+      lastFetchStartRef.current = 0;
+      fetchData();
     };
     requestAndroidWakeLock().then((ok) => {
       if (ok) setAndroidKeepAwake(true);
     });
     window.addEventListener("touchstart", unlockOnTouch, { passive: true });
     window.addEventListener("click", unlockOnTouch, { passive: true });
+    window.addEventListener("online", handleOnline);
     document.addEventListener("visibilitychange", handleVisibility);
     return () => {
       window.removeEventListener("touchstart", unlockOnTouch);
       window.removeEventListener("click", unlockOnTouch);
+      window.removeEventListener("online", handleOnline);
       document.removeEventListener("visibilitychange", handleVisibility);
     };
   }, []);
 
   const fetchData = async () => {
-    if (isFetchingRef.current) return;
+    const now = Date.now();
+    if (isFetchingRef.current) {
+      if (now - lastFetchStartRef.current < 12000) {
+        return;
+      }
+      // Si el fetch previo lleva más de 12s pendiente (bloqueado por red o móvil), forzar desbloqueo
+      isFetchingRef.current = false;
+    }
     isFetchingRef.current = true;
+    lastFetchStartRef.current = Date.now();
+
+    setBackendStatus((prev) => (prev.startsWith("🟢") ? prev : "🟡 Conectando con servidor..."));
 
     try {
       const queryParams = new URLSearchParams({
@@ -310,25 +331,48 @@ export default function TrendSpiderPage() {
       });
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000);
+      const timeoutId = setTimeout(() => controller.abort(), 12000);
+
+      const fetchPromise = (async () => {
+        try {
+          return await fetch(`${customApi}/signals/live?${queryParams.toString()}`, {
+            cache: "no-store",
+            signal: controller.signal
+          });
+        } catch (fetchErr) {
+          const isLocalHost = typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
+          if (isLocalHost && !customApi.includes("localhost")) {
+            try {
+              const localRes = await fetch(`http://localhost:8000/signals/live?${queryParams.toString()}`, {
+                cache: "no-store",
+                signal: controller.signal
+              });
+              setCustomApi("http://localhost:8000");
+              return localRes;
+            } catch (e) {}
+          }
+          throw fetchErr;
+        }
+      })();
+
+      const hardTimeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Tiempo de espera agotado (12s)")), 12500)
+      );
 
       let res;
       try {
-        res = await fetch(`${customApi}/signals/live?${queryParams.toString()}`, {
-          cache: "no-store",
-          signal: controller.signal
-        });
+        res = await Promise.race([fetchPromise, hardTimeoutPromise]);
       } catch (err) {
-        const isLocalHost = typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
-        if (isLocalHost && !customApi.includes("localhost")) {
-          try {
-            res = await fetch(`http://localhost:8000/signals/live?${queryParams.toString()}`, {
-              cache: "no-store",
-              signal: controller.signal
-            });
-            setCustomApi("http://localhost:8000");
-          } catch (e) {}
-        }
+        // Intento de rescate rápido despertando backend /health
+        try {
+          const pingCtrl = new AbortController();
+          const pingTimer = setTimeout(() => pingCtrl.abort(), 3500);
+          const health = await fetch(`${customApi}/health`, { signal: pingCtrl.signal, cache: "no-store" });
+          clearTimeout(pingTimer);
+          if (health.ok) {
+            res = await fetch(`${customApi}/signals/live?${queryParams.toString()}`, { cache: "no-store" });
+          }
+        } catch (pingErr) {}
         if (!res) throw err;
       } finally {
         clearTimeout(timeoutId);
@@ -339,6 +383,7 @@ export default function TrendSpiderPage() {
       const sig = Array.isArray(data) && data.length > 0 ? data[0] : data.symbol ? data : null;
 
       if (sig && sig.symbol?.includes("XAU")) {
+        lastSuccessfulFetchRef.current = Date.now();
         const prev = lastAlertRef.current;
         const currDir = sig.direction;
         const currType = sig.alert_type;
@@ -402,13 +447,29 @@ export default function TrendSpiderPage() {
     let isMounted = true;
 
     const pollLoop = async () => {
-      await fetchData();
-      if (isMounted) {
-        timerId = setTimeout(pollLoop, 3000);
+      try {
+        await fetchData();
+      } catch (err) {
+        console.warn("Poll loop error:", err);
+      } finally {
+        if (isMounted) {
+          timerId = setTimeout(pollLoop, 3000);
+        }
       }
     };
 
     pollLoop();
+
+    // Guardián watchdog: si no se ha recibido señal exitosa en más de 8s, fuerza un nuevo intento
+    const watchdogInterval = setInterval(() => {
+      if (!isMounted) return;
+      const elapsed = Date.now() - lastSuccessfulFetchRef.current;
+      if (elapsed > 8000) {
+        isFetchingRef.current = false;
+        lastFetchStartRef.current = 0;
+        fetchData();
+      }
+    }, 4000);
 
     const clockInterval = setInterval(() => {
       const now = new Date().toLocaleString("es-EC", {
@@ -426,6 +487,7 @@ export default function TrendSpiderPage() {
     return () => {
       isMounted = false;
       if (timerId) clearTimeout(timerId);
+      clearInterval(watchdogInterval);
       clearInterval(clockInterval);
     };
   }, [analysisType, drawingInput, islandGaps, qualityFilter, heatmapMode, aiModel, tpPct, slPct, horizon, truthLocked, lockTimestamp]);
@@ -507,7 +569,13 @@ export default function TrendSpiderPage() {
               </span>
             </div>
             <button
-              onClick={() => { setLoading(true); fetchData(); }}
+              onClick={() => {
+                isFetchingRef.current = false;
+                lastFetchStartRef.current = 0;
+                setLoading(true);
+                setBackendStatus("🟡 Reconectando ahora...");
+                fetchData();
+              }}
               style={{
                 background: "#f59e0b",
                 color: "#000",
@@ -551,7 +619,13 @@ export default function TrendSpiderPage() {
             <div style={{ fontSize: "11px", color: "#94a3b8", marginTop: "4px", display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
               <span>{timeEc} • {backendStatus} • <strong style={{ color: "#4ade80" }}>Latido #{heartbeatCount} (3s)</strong></span>
               <button
-                onClick={() => { isFetchingRef.current = false; fetchData(); }}
+                onClick={() => {
+                  isFetchingRef.current = false;
+                  lastFetchStartRef.current = 0;
+                  setLoading(true);
+                  setBackendStatus("🟡 Reconectando ahora...");
+                  fetchData();
+                }}
                 style={{
                   background: "rgba(245, 158, 11, 0.2)",
                   color: "#facc15",

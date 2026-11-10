@@ -1,4 +1,4 @@
-const CACHE_NAME = "edgealert-v16";
+const CACHE_NAME = "edgealert-v18";
 
 self.addEventListener("install", (event) => {
   self.skipWaiting();
@@ -8,7 +8,7 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys().then((keys) => {
       return Promise.all(
-        keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))
+        keys.map((key) => caches.delete(key))
       );
     }).then(() => self.clients.claim())
   );
@@ -53,7 +53,18 @@ self.addEventListener("notificationclick", (event) => {
   );
 });
 
+// NUNCA interceptar peticiones a la API de Render ni peticiones cross-origin.
+// Se dejan pasar directo al stack de red nativo del navegador para eliminar cualquier cuelgue en móviles.
 self.addEventListener("fetch", (event) => {
-  // Pass-through sin alterar peticiones dinámicas de API
-  event.respondWith(fetch(event.request).catch(() => caches.match(event.request)));
+  if (
+    !event.request.url.startsWith(self.location.origin) ||
+    event.request.url.includes("/signals/") ||
+    event.request.url.includes("/health") ||
+    event.request.method !== "GET"
+  ) {
+    return;
+  }
+  event.respondWith(
+    fetch(event.request).catch(() => caches.match(event.request))
+  );
 });

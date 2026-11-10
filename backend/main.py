@@ -213,55 +213,93 @@ def get_live_spot_price() -> Tuple[float, str]:
     return 4120.50, "FALLBACK"
 
 def sync_historical_1m_candles():
-    """Descarga hasta 240 velas reales de 1 minuto (4 horas) para cubrir todo el movimiento de la mañana"""
+    """
+    Sincroniza hasta 240 velas reales de 1 minuto (4 horas) con CERO RETRASO:
+    1. Fuente Primaria (0s lag): Binance Vision PAXGUSDT 1m Klines + calibración de base exacta con Swissquote Spot XAU/USD.
+    2. Fuente Secundaria (Fallback): Yahoo Finance GC=F 1m.
+    """
+    live_p, _ = get_live_spot_price()
+    synced = False
+
+    # 1. Fuente Primaria: Binance Vision PAXGUSDT (Tiempo Real estricto, 0 segundos de retraso)
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1m&range=1d"
-        r = requests.get(url, headers=headers, timeout=5)
-        live_p, _ = get_live_spot_price()
-        if r.status_code == 200:
-            res = r.json().get("chart", {}).get("result", [])
-            if res:
-                timestamps = res[0].get("timestamp", [])[-240:]
-                quote = res[0].get("indicators", {}).get("quote", [{}])[0]
-                opens = quote.get("open", [])[-240:]
-                highs = quote.get("high", [])[-240:]
-                lows = quote.get("low", [])[-240:]
-                closes = quote.get("close", [])[-240:]
-                vols = quote.get("volume", [])[-240:]
-
-                valid_closes = [c for c in closes if c is not None and c > 1000]
-                basis = (live_p - valid_closes[-1]) if valid_closes else 0.0
-
+        url_bv = "https://data-api.binance.vision/api/v3/klines?symbol=PAXGUSDT&interval=1m&limit=240"
+        r_bv = requests.get(url_bv, timeout=4)
+        if r_bv.status_code == 200:
+            klines = r_bv.json()
+            if isinstance(klines, list) and len(klines) >= 30:
+                last_close = float(klines[-1][4])
+                basis = (live_p - last_close) if (live_p > 1000 and last_close > 1000) else 0.0
                 conn = sqlite3.connect(DB_PATH)
                 c = conn.cursor()
-                for i in range(len(timestamps)):
-                    if None in (opens[i], highs[i], lows[i], closes[i]):
-                        continue
-                    ts_min = (int(timestamps[i]) // 60) * 60
-                    o = round(float(opens[i]) + basis, 2)
-                    h = round(float(highs[i]) + basis, 2)
-                    l = round(float(lows[i]) + basis, 2)
-                    cl = round(float(closes[i]) + basis, 2)
-                    v = float(vols[i] or 0)
-
+                for k in klines:
+                    ts_min = (int(k[0]) // 1000 // 60) * 60
+                    o = round(float(k[1]) + basis, 2)
+                    h = round(float(k[2]) + basis, 2)
+                    l = round(float(k[3]) + basis, 2)
+                    cl = round(float(k[4]) + basis, 2)
+                    v = round(float(k[5]), 2)
                     c.execute("SELECT source FROM ohlc_1m WHERE ts=?", (ts_min,))
                     existing = c.fetchone()
                     if not existing or existing[0] != "TRADINGVIEW_ACCOUNT":
                         c.execute("""INSERT OR REPLACE INTO ohlc_1m (ts,open,high,low,close,volume,source)
-                                     VALUES (?,?,?,?,?,?,?)""", (ts_min, o, h, l, cl, v, "SYNC_1M"))
+                                     VALUES (?,?,?,?,?,?,?)""", (ts_min, o, h, l, cl, v, "BINANCE_SPOT_SYNC"))
                 conn.commit()
                 conn.close()
+                synced = True
                 return
     except Exception as e:
-        print(f"Sync historical 1m warning: {e}")
+        print(f"Binance Vision 1m sync warning: {e}")
+
+    # 2. Fuente Secundaria: Yahoo Finance GC=F
+    if not synced:
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1m&range=1d"
+            r = requests.get(url, headers=headers, timeout=4)
+            if r.status_code == 200:
+                res = r.json().get("chart", {}).get("result", [])
+                if res:
+                    timestamps = res[0].get("timestamp", [])[-240:]
+                    quote = res[0].get("indicators", {}).get("quote", [{}])[0]
+                    opens = quote.get("open", [])[-240:]
+                    highs = quote.get("high", [])[-240:]
+                    lows = quote.get("low", [])[-240:]
+                    closes = quote.get("close", [])[-240:]
+                    vols = quote.get("volume", [])[-240:]
+
+                    valid_closes = [c for c in closes if c is not None and c > 1000]
+                    basis = (live_p - valid_closes[-1]) if valid_closes else 0.0
+
+                    conn = sqlite3.connect(DB_PATH)
+                    c = conn.cursor()
+                    for i in range(len(timestamps)):
+                        if None in (opens[i], highs[i], lows[i], closes[i]):
+                            continue
+                        ts_min = (int(timestamps[i]) // 60) * 60
+                        o = round(float(opens[i]) + basis, 2)
+                        h = round(float(highs[i]) + basis, 2)
+                        l = round(float(lows[i]) + basis, 2)
+                        cl = round(float(closes[i]) + basis, 2)
+                        v = float(vols[i] or 0)
+
+                        c.execute("SELECT source FROM ohlc_1m WHERE ts=?", (ts_min,))
+                        existing = c.fetchone()
+                        if not existing or existing[0] != "TRADINGVIEW_ACCOUNT":
+                            c.execute("""INSERT OR REPLACE INTO ohlc_1m (ts,open,high,low,close,volume,source)
+                                         VALUES (?,?,?,?,?,?,?)""", (ts_min, o, h, l, cl, v, "SYNC_1M"))
+                    conn.commit()
+                    conn.close()
+                    return
+        except Exception as e:
+            print(f"Sync historical 1m warning: {e}")
 
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("SELECT COUNT(*) FROM ohlc_1m")
         if c.fetchone()[0] < 60:
-            base, _ = get_live_spot_price()
+            base = live_p if live_p > 1000 else 4125.0
             now_min = (int(datetime.now(timezone.utc).timestamp()) // 60) * 60
             for i in range(180):
                 ts = now_min - ((180 - i) * 60)
@@ -328,111 +366,141 @@ def get_1m_candles(limit: int = 180) -> List[Dict[str, Any]]:
 
 def detect_m5_swing_pullbacks(candles_5m: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Detecta la estructura clásica de Impulso y Retroceso en M5 (exactamente como el gráfico de 08:00 a 10:30):
-    1. Impulso Alcista -> Retroceso al 38.2%-61.8% (HL) -> Vela Verde de Giro (Rebote de Compra)
-    2. Ruptura de Máximo Previo (BOS Alcista) -> Continuación
-    3. Doble Techo + Ruptura de Soporte (CHoCH Bajista) -> Cambio de Tendencia a Venta
-    4. Impulso Bajista -> Rebote al 38.2%-61.8% (LH) -> Vela Roja de Rechazo (Re-entrada Venta)
+    Motor Institucional M5 Anti-Trampas (Validado con el movimiento real 20:00 - 21:20):
+    1. Detecta Techos y Rechazos ("Bear Wick" / Envolvente Bajista en máximo, ej. 20:30 en $4,140.50) -> SELL_CHOCH inmediato.
+    2. Bloquea "Bull Traps" (rebotes de gato muerto tras vela bajista fuerte, ej. 20:35 en $4,130.92) -> PROHIBIDO COMPRAR.
+    3. Captura Retrocesos Bajistas (LH bajo EMA8/EMA18, ej. 20:40 - 20:55) -> SELL_PULLBACK.
+    4. Captura Absorción en Suelo (ej. 20:00 en $4,121.45) -> BUY_REVERSAL y Retrocesos Alcistas (HL sobre EMA8/EMA18) -> BUY_PULLBACK.
     """
-    if len(candles_5m) < 6:
-        return {"signal": "NONE", "structure": "CALIBRANDO_M5", "reason": "", "fib_ret": 0.5}
+    if len(candles_5m) < 8:
+        return {
+            "signal": "NONE", "structure": "CALIBRANDO_M5", "reason": "",
+            "fib_ret": 0.5, "bull_trap_block": False, "bear_trap_block": False
+        }
 
-    window = candles_5m[-24:] # últimas 2 horas de velas de 5m
-    highs = [c["high"] for c in window]
-    lows = [c["low"] for c in window]
+    window = candles_5m[-24:]
+    closes = [c["close"] for c in window]
+
+    def calc_ema(vals: List[float], span: int) -> float:
+        k = 2.0 / (span + 1.0)
+        ema_val = vals[0]
+        for v in vals[1:]:
+            ema_val = v * k + ema_val * (1.0 - k)
+        return ema_val
+
+    ema8 = calc_ema(closes, 8)
+    ema18 = calc_ema(closes, 18)
+
     last_c = window[-1]
     prev_c = window[-2]
     prev2_c = window[-3] if len(window) >= 3 else prev_c
 
-    # Identificar pivotes recientes en M5
-    swing_highs = []
-    swing_lows = []
-    for i in range(1, len(window) - 1):
-        if window[i]["high"] >= window[i - 1]["high"] and window[i]["high"] >= window[i + 1]["high"]:
-            swing_highs.append((i, window[i]["high"]))
-        if window[i]["low"] <= window[i - 1]["low"] and window[i]["low"] <= window[i + 1]["low"]:
-            swing_lows.append((i, window[i]["low"]))
-
-    if not swing_highs:
-        swing_highs = [(0, max(highs))]
-    if not swing_lows:
-        swing_lows = [(0, min(lows))]
-
-    last_sh_idx, last_sh = swing_highs[-1]
-    prev_sh = swing_highs[-2][1] if len(swing_highs) >= 2 else last_sh
-    last_sl_idx, last_sl = swing_lows[-1]
-    prev_sl = swing_lows[-2][1] if len(swing_lows) >= 2 else last_sl
+    recent_12 = window[-12:]
+    recent_high = max(c["high"] for c in recent_12)
+    recent_low = min(c["low"] for c in recent_12)
+    leg_range = max(recent_high - recent_low, 2.0)
 
     live_p = last_c["close"]
     last_bull = last_c["close"] >= last_c["open"]
     prev_bull = prev_c["close"] >= prev_c["open"]
+    last_body = abs(last_c["close"] - last_c["open"])
+    prev_body = abs(prev_c["close"] - prev_c["open"])
+    last_upper_wick = last_c["high"] - max(last_c["open"], last_c["close"])
+    last_lower_wick = min(last_c["open"], last_c["close"]) - last_c["low"]
 
-    # Rango de la última pierna M5
-    leg_range = max(abs(last_sh - last_sl), 1.5)
+    # Detector de Desplazamiento Bajista Reciente (Bloqueador de Bull Traps como el de las 20:35)
+    prev2_bull = prev2_c["close"] >= prev2_c["open"]
+    recent_bear_displacement = (
+        (not prev_bull and prev_body >= 3.2) or
+        (not prev2_bull and abs(prev2_c["close"] - prev2_c["open"]) >= 3.8 and live_p < prev2_c["open"] - 1.5) or
+        (ema8 < ema18 and live_p < ema8)
+    )
+    # Detector de Desplazamiento Alcista Reciente (Bloqueador de Bear Traps en pleno rally)
+    recent_bull_displacement = (
+        (prev_bull and prev_body >= 3.2) or
+        (ema8 > ema18 and live_p > ema8)
+    )
 
-    # Caso 1: Estructura Alcista M5 (Impulso -> Retroceso HL -> Giro Alcista)
-    if last_sl_idx < last_sh_idx or live_p >= (last_sh + last_sl) / 2.0:
-        fib_ret = round((last_sh - live_p) / leg_range, 3)
-        low_fib_ret = round((last_sh - min(last_c["low"], prev_c["low"])) / leg_range, 3)
+    # 1. GIRO EN TECHO / BEAR WICK / ENVOLVENTE BAJISTA (Ej: 20:30 en $4,140.50 -> caída a $4,131)
+    near_top = (max(last_c["high"], prev_c["high"]) >= recent_high - 1.8)
+    if near_top and not last_bull and (last_body >= 2.2 or last_upper_wick >= 1.5) and live_p < prev_c["low"] + 1.0:
+        return {
+            "signal": "SELL_CHOCH",
+            "structure": "RECHAZO EN TECHO M5 (Bear Wick + Giro Bajista)",
+            "reason": f"Fuerte rechazo institucional en el techo de ${recent_high:.2f} con vela bajista de desplazamiento (${last_c['open']:.2f} → ${live_p:.2f}). Giro confirmado a VENTA.",
+            "fib_ret": round((live_p - recent_low) / leg_range, 3),
+            "last_sh": recent_high,
+            "last_sl": recent_low,
+            "bull_trap_block": True,
+            "bear_trap_block": False
+        }
 
-        # A. Rebote de Compra tras Retroceso (el mínimo tocó entre 0.30 y 0.75 Fib y ahora cierra vela verde o mecha inferior larga)
-        if 0.28 <= low_fib_ret <= 0.78 and (last_bull or (last_c["close"] - last_c["low"]) >= 1.2):
-            if last_sl >= prev_sl - 1.5: # Mantiene estructura HL
-                return {
-                    "signal": "BUY_PULLBACK",
-                    "structure": "IMPULSO + RETROCESO ALCISTA M5 (HL)",
-                    "reason": f"El retroceso frenó en el {low_fib_ret*100:.0f}% de Fibonacci (${min(last_c['low'], prev_c['low']):.2f}) y confirmó vela de giro alcista rumbo a ${last_sh:.2f}.",
-                    "fib_ret": fib_ret,
-                    "last_sh": last_sh,
-                    "last_sl": last_sl
-                }
+    # 2. ABSORCIÓN INSTITUCIONAL EN SUELO / GIRO ALCISTA (Ej: 20:00 en $4,121.45 -> subida a $4,132)
+    near_bottom = (min(last_c["low"], prev_c["low"]) <= recent_low + 1.8)
+    if near_bottom and last_bull and (last_body >= 2.2 or last_lower_wick >= 1.5) and live_p > prev_c["high"] - 1.0:
+        return {
+            "signal": "BUY_REVERSAL",
+            "structure": "ABSORCIÓN INSTITUCIONAL EN SUELO M5 (Giro Alcista)",
+            "reason": f"Defensa compradora en piso ${recent_low:.2f} con vela alcista envolvente (${last_c['open']:.2f} → ${live_p:.2f}). Inicio de impulso comprador.",
+            "fib_ret": round((recent_high - live_p) / leg_range, 3),
+            "last_sh": recent_high,
+            "last_sl": recent_low,
+            "bull_trap_block": False,
+            "bear_trap_block": True
+        }
 
-        # B. CHoCH Bajista (Doble techo en M5 y ruptura del soporte previo hacia abajo, como a las 09:30 en la foto)
-        if abs(last_sh - prev_sh) <= 2.5 and live_p < last_sl and not last_bull:
+    # 3. RETROCESO BAJISTA M5 (LH) Y FILTRO ANTI-BULL-TRAP (Ej: 20:35 a 21:05)
+    if live_p < ema8 or ema8 < ema18 or recent_bear_displacement:
+        # Si hubo un desplome fuerte en la vela previa y la vela actual es verde pero sigue debajo del inicio del desplome -> ES UNA TRAMPA ALCISTA (como a las 20:35 en $4130.92)
+        if last_bull and ((not prev_bull and prev_body >= 3.2 and live_p < prev_c["open"] - 1.0) or (live_p < ema18)):
             return {
-                "signal": "SELL_CHOCH",
-                "structure": "CAMBIO DE CARÁCTER BAJISTA M5 (Doble Techo + Quiebre)",
-                "reason": f"Techo rechazado en ${last_sh:.2f} y ruptura del soporte estructural M5 (${last_sl:.2f}). Giro confirmado a VENTA.",
-                "fib_ret": fib_ret,
-                "last_sh": last_sh,
-                "last_sl": last_sl
+                "signal": "NONE",
+                "structure": "ALERTA TRAMPA ALCISTA (Rebote Débil en Caída M5)",
+                "reason": f"Subida correctiva sin fuerza tras desplome desde ${recent_high:.2f}. Prohibido comprar contra el flujo bajista.",
+                "fib_ret": round((live_p - recent_low) / leg_range, 3),
+                "last_sh": recent_high,
+                "last_sl": recent_low,
+                "bull_trap_block": True,
+                "bear_trap_block": False
             }
 
-    # Caso 2: Estructura Bajista M5 (Impulso Bajista -> Rebote LH -> Rechazo a la Baja)
-    if last_sh_idx < last_sl_idx or live_p < (last_sh + last_sl) / 2.0:
-        fib_ret = round((live_p - last_sl) / leg_range, 3)
-        high_fib_ret = round((max(last_c["high"], prev_c["high"]) - last_sl) / leg_range, 3)
-
-        # A. Re-entrada en Venta tras Rebote (subió al 30%-75% del impulso bajista y rechaza en rojo)
-        if 0.28 <= high_fib_ret <= 0.78 and (not last_bull or (last_c["high"] - last_c["close"]) >= 1.2):
-            if last_sh <= prev_sh + 1.5: # Mantiene LH
-                return {
-                    "signal": "SELL_PULLBACK",
-                    "structure": "IMPULSO + RETROCESO BAJISTA M5 (LH)",
-                    "reason": f"El rebote alcista agotó fuerza en el {high_fib_ret*100:.0f}% de Fibonacci (${max(last_c['high'], prev_c['high']):.2f}) iniciando nuevo impulso bajista hacia ${last_sl:.2f}.",
-                    "fib_ret": fib_ret,
-                    "last_sh": last_sh,
-                    "last_sl": last_sl
-                }
-
-        # B. Giro Alcista desde el Suelo (Doble piso / Absorción en soporte como a las 10:15 en $4115)
-        if (last_c["low"] <= last_sl + 1.2 or prev_c["low"] <= last_sl + 1.2) and last_bull and (last_c["close"] - last_c["open"]) >= 1.2:
+        # Confirmación de continuación bajista tras el rebote (Vela roja o mecha superior de rechazo bajo EMA18)
+        if not last_bull or last_upper_wick >= 1.2:
             return {
-                "signal": "BUY_REVERSAL",
-                "structure": "ABSORCIÓN INSTITUCIONAL EN SUELO M5",
-                "reason": f"Fuerte rechazo comprador en piso ${last_sl:.2f} con vela envolvente M5 confirmada.",
-                "fib_ret": fib_ret,
-                "last_sh": last_sh,
-                "last_sl": last_sl
+                "signal": "SELL_PULLBACK",
+                "structure": "IMPULSO + RETROCESO BAJISTA M5 (LH Confirmado)",
+                "reason": f"El rebote alcista fue rechazado bajo la media institucional (${ema8:.2f}), continuando la caída hacia ${recent_low:.2f}.",
+                "fib_ret": round((live_p - recent_low) / leg_range, 3),
+                "last_sh": recent_high,
+                "last_sl": recent_low,
+                "bull_trap_block": True,
+                "bear_trap_block": False
+            }
+
+    # 4. RETROCESO ALCISTA M5 (HL) EN TENDENCIA COMPRADORA (Ej: 20:15 a 20:25)
+    if (live_p >= ema8 or ema8 >= ema18) and not recent_bear_displacement:
+        low_fib_ret = round((recent_high - min(last_c["low"], prev_c["low"])) / leg_range, 3)
+        if 0.15 <= low_fib_ret <= 0.78 and (last_bull or last_lower_wick >= 1.2):
+            return {
+                "signal": "BUY_PULLBACK",
+                "structure": "IMPULSO + RETROCESO ALCISTA M5 (HL Confirmado)",
+                "reason": f"Retroceso saludable defendido sobre EMA institucional (${ema8:.2f}) con giro alcista rumbo a ${recent_high:.2f}.",
+                "fib_ret": low_fib_ret,
+                "last_sh": recent_high,
+                "last_sl": recent_low,
+                "bull_trap_block": False,
+                "bear_trap_block": True
             }
 
     return {
         "signal": "NONE",
-        "structure": "DESARROLLO M5",
-        "reason": f"Rango M5 entre soporte ${last_sl:.2f} y techo ${last_sh:.2f}.",
+        "structure": "CONSOLIDACIÓN M5",
+        "reason": f"Precio entre soporte ${recent_low:.2f} y resistencia ${recent_high:.2f}. Esperando ruptura o rechazo limpio.",
         "fib_ret": 0.5,
-        "last_sh": last_sh,
-        "last_sl": last_sl
+        "last_sh": recent_high,
+        "last_sl": recent_low,
+        "bull_trap_block": recent_bear_displacement,
+        "bear_trap_block": recent_bull_displacement
     }
 
 def reconstruct_morning_signals_if_empty(candles_1m: List[Dict[str, Any]]):
@@ -567,8 +635,15 @@ def analyze_market_trendspider(
     update_current_1m_candle(live_price, "FEED")
 
     candles_1m = get_1m_candles(180)
-    if len(candles_1m) < 45:
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    need_sync = (
+        len(candles_1m) < 60 or
+        (len(candles_1m) >= 2 and (now_ts - candles_1m[-2]["ts"]) > 150) or
+        any(c.get("source") == "SYNC_1M" for c in candles_1m[-5:])
+    )
+    if need_sync:
         sync_historical_1m_candles()
+        update_current_1m_candle(live_price, "FEED")
         candles_1m = get_1m_candles(180)
 
     # Reconstruir historial de la mañana si la base de datos estaba recién creada
@@ -648,20 +723,27 @@ def analyze_market_trendspider(
     sell_points = 0
     confluences_audit = []
 
-    # Pilar A: Estructura M5 de Impulso y Retroceso (Como en el gráfico de 08:00 - 10:30)
+    # Pilar A: Estructura M5 de Impulso y Retroceso + Filtro Anti-Trampas
     m5_sig = m5_swing["signal"]
     if m5_sig in ["BUY_PULLBACK", "BUY_REVERSAL"]:
-        buy_points += 5
+        buy_points += 6
         confluences_audit.append({
-            "module": "ESTRUCTURA_M5", "side": "COMPRA", "weight": 5,
+            "module": "ESTRUCTURA_M5", "side": "COMPRA", "weight": 6,
             "title": f"🎯 {m5_swing['structure']}",
             "desc": m5_swing["reason"]
         })
     elif m5_sig in ["SELL_PULLBACK", "SELL_CHOCH"]:
-        sell_points += 5
+        sell_points += 6
         confluences_audit.append({
-            "module": "ESTRUCTURA_M5", "side": "VENTA", "weight": 5,
+            "module": "ESTRUCTURA_M5", "side": "VENTA", "weight": 6,
             "title": f"🎯 {m5_swing['structure']}",
+            "desc": m5_swing["reason"]
+        })
+    elif m5_swing.get("bull_trap_block"):
+        sell_points += 3
+        confluences_audit.append({
+            "module": "FILTRO_ANTI_TRAMPAS", "side": "VENTA", "weight": 3,
+            "title": f"🛡️ {m5_swing['structure']}",
             "desc": m5_swing["reason"]
         })
 
@@ -908,9 +990,12 @@ def analyze_market_trendspider(
         flip_reason = f"En VENTA ({pnl:+.2f} USD)"
         confidence_score = 86
 
-    # 3. Disparo de NUEVA Entrada (Aprovecha Impulso+Retroceso M5 o Confluencia TrendSpider)
+    # 3. Disparo de NUEVA Entrada (Aprovecha Impulso+Retroceso M5 con Filtro Anti-Trampas)
     else:
-        if buy_points >= 5 and buy_points >= sell_points + 3:
+        bull_trap_blocked = bool(m5_swing.get("bull_trap_block", False))
+        bear_trap_blocked = bool(m5_swing.get("bear_trap_block", False))
+
+        if buy_points >= 5 and buy_points >= sell_points + 3 and not bull_trap_blocked:
             final_dir = "COMPRA"
             entry_p = live_price
             current_sl = round(live_price - sl_distance, 2)
@@ -924,7 +1009,7 @@ def analyze_market_trendspider(
             update_last_signal("COMPRA", "NEW_ENTRY", entry_p, current_sl, current_tp1, current_tp2, entry_p)
             log_signal_event("ENTER", "COMPRA", entry_p, current_sl, current_tp1, 0.0, m5_swing["structure"] + ": " + m5_swing["reason"])
 
-        elif sell_points >= 5 and sell_points >= buy_points + 3:
+        elif sell_points >= 5 and sell_points >= buy_points + 3 and not bear_trap_blocked:
             final_dir = "VENTA"
             entry_p = live_price
             current_sl = round(live_price + sl_distance, 2)
@@ -1136,9 +1221,9 @@ async def startup_event():
                 if p > 1000:
                     update_current_1m_candle(p, "FEED")
                 ticks += 1
-                if ticks % 40 == 0:
+                if ticks % 4 == 0:
                     sync_historical_1m_candles()
             except Exception as e:
                 print(f"Monitor loop error: {e}")
-            await asyncio.sleep(6)
+            await asyncio.sleep(5)
     asyncio.create_task(monitor_loop())

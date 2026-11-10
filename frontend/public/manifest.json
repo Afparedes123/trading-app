@@ -1,0 +1,10 @@
+{
+  "name": "EdgeAlert TrendSpider XAUUSD",
+  "short_name": "EdgeAlert M5",
+  "description": "Motor Institucional TrendSpider M5 + Alertas Continuas en Tiempo Real para XAU/USD",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#08090c",
+  "theme_color": "#f59e0b",
+  "orientation": "portrait"
+}
